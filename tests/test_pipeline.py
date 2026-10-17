@@ -1,5 +1,6 @@
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -78,19 +79,60 @@ def test_prefers_sentence_ends():
     assert [s.end for s in segs][:-1] in ([4, 8], [8])
 
 
-def test_build_prompt_repeats_bible_and_dialogue():
-    plan = mv.VideoPlan(
-        title="t", visual_style="STYLE", setting="SETTING", lighting="LIGHT", ambience="birdsong",
-        characters=[mv.Character(name="Ana", appearance="APPEAR", wardrobe="WARD", mannerisms="MAN")],
-        shots=[mv.Shot(index=1, camera="CAM", action="ACT", expression="EXP",
-                       speaker_on_screen=True, speaker_name="Ana", continuity="CONT")],
+def _plan(appearance="APPEAR", n_shots=1):
+    return mv.VideoPlan(
+        title="t", visual_style="STYLE", setting="SETTING", lighting="LIGHT",
+        characters=[mv.Character(name="Ana", appearance=appearance, wardrobe="WARD")],
+        shots=[mv.Shot(index=i + 1, camera="CAM", action="ACT", expression="EXP",
+                       speaker_on_screen=True, speaker_name="Ana", continuity="CONT")
+               for i in range(n_shots)],
     )
+
+
+def test_build_prompt_repeats_bible_and_dialogue():
+    plan = _plan()
     seg = plan_segments(words_from_alignment(fake_alignment("Hi there.")), 1.0)[0]
-    p = mv.build_veo_prompt(plan, plan.shots[0], seg, 1, lip_sync=True)
+    p = mv.build_veo_prompt(plan, plan.shots[0], seg, lip_sync=True)
     for token in ("STYLE", "SETTING", "LIGHT", "APPEAR", "WARD", "CAM", "ACT", "CONT", '"Hi there."'):
         assert token in p
-    p2 = mv.build_veo_prompt(plan, plan.shots[0], seg, 1, lip_sync=False)
+    assert p.index("CAMERA") < p.index("SETTING"), "shot details should come before the bible"
+    p2 = mv.build_veo_prompt(plan, plan.shots[0], seg, lip_sync=False)
     assert '"Hi there."' not in p2
+
+
+class _CondensingClient:
+    """Fake Gemini client whose condense call returns a short bible."""
+    def __init__(self):
+        self.calls = 0
+        outer = self
+
+        class Models:
+            def generate_content(self, model, contents, config):
+                outer.calls += 1
+                assert config.response_schema is mv.Bible
+                short = mv.Bible(visual_style="STYLE", setting="SETTING", lighting="LIGHT",
+                                 characters=[mv.Character(name="Ana", appearance="short", wardrobe="WARD")])
+                return SimpleNamespace(parsed=short, text=short.model_dump_json())
+        self.models = Models()
+
+
+def test_long_prompts_are_condensed_to_fit_veo():
+    plan = _plan(appearance="very detailed " * 400, n_shots=2)
+    segs = plan_segments(words_from_alignment(fake_alignment(SCRIPT)), 18.4)[:2]
+    client = _CondensingClient()
+    items = mv.assemble_prompts(client, plan, segs, lip_sync=True)
+    assert client.calls == 1
+    assert all(len(i["prompt"]) <= mv.VEO_MAX_PROMPT_CHARS for i in items)
+    # Both clips still share the exact same character description.
+    assert all("- Ana: short Wearing: WARD" in i["prompt"] for i in items)
+
+
+def test_short_prompts_are_left_alone():
+    plan = _plan(n_shots=1)
+    segs = plan_segments(words_from_alignment(fake_alignment("Hi there.")), 1.0)
+    client = _CondensingClient()
+    mv.assemble_prompts(client, plan, segs, lip_sync=True)
+    assert client.calls == 0
 
 
 def _make_clip(path: Path, seconds: int, color: str):

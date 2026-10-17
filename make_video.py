@@ -49,7 +49,9 @@ NEGATIVE_PROMPT = (
     "change of character appearance, change of wardrobe, change of hairstyle, "
     "change of location, extra people, distorted faces, deformed hands, low quality"
 )
-VEO_PROMPT_SOFT_LIMIT = 4000  # characters; very long prompts get truncated by Veo
+# Veo 3.1 reads at most 1,024 prompt tokens and silently drops the rest. English runs
+# about 4 characters per token, so this keeps every prompt safely under the limit.
+VEO_MAX_PROMPT_CHARS = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -140,40 +142,43 @@ def generate_voice(talk_track: str, run: Path) -> tuple[Path, dict]:
 class Character(BaseModel):
     name: str = Field(description="Short name used to refer to the character.")
     appearance: str = Field(description=(
-        "Exhaustive physical description that never changes: apparent age, gender, "
-        "ethnicity, skin tone, face shape, eye colour, eyebrows, nose, facial hair, "
-        "hair colour, length, texture and style, build, height, distinguishing marks."))
+        "Fixed physical identity in at most 45 words: apparent age, gender, ethnicity, "
+        "skin tone, face shape, eye colour, hair colour/length/style, facial hair, build, "
+        "distinguishing marks."))
     wardrobe: str = Field(description=(
-        "Exact clothing and accessories with colours, materials, fit and details."))
-    mannerisms: str = Field(description="Posture, typical gestures, demeanour.")
+        "Exact clothing and accessories with colours and materials, at most 30 words."))
+
+
+class Bible(BaseModel):
+    """The parts repeated word for word in every clip prompt."""
+    visual_style: str = Field(description=(
+        "Film look in at most 30 words: medium (e.g. photoreal cinematic), lens/film feel, "
+        "colour grade, depth of field."))
+    setting: str = Field(description=(
+        "The location in at most 60 words: architecture, key furniture and props with "
+        "their positions, background, time of day."))
+    lighting: str = Field(description=(
+        "Light sources, direction, quality and colour temperature, at most 25 words."))
+    characters: list[Character]
 
 
 class Shot(BaseModel):
     index: int
-    camera: str = Field(description="Shot size, lens feel, angle and camera movement.")
+    camera: str = Field(description="Shot size, angle and camera movement, at most 20 words.")
     action: str = Field(description=(
-        "What happens on screen during this segment, in detail, matched to what is said."))
-    expression: str = Field(description="Facial expression and body language of the people on screen.")
+        "What happens on screen, matched to what is said, at most 45 words."))
+    expression: str = Field(description="Facial expression and body language, at most 15 words.")
     speaker_on_screen: bool = Field(description=(
         "True if a visible character is speaking the line to camera in this shot; "
         "False if the line is voice-over over B-roll."))
     speaker_name: str = Field(description="Name of the on-screen speaker, or empty string.")
     continuity: str = Field(description=(
         "How this shot connects to the previous and next shots (positions, props, "
-        "eyeline, motion) so the clips cut together seamlessly."))
+        "eyeline, motion), at most 25 words."))
 
 
-class VideoPlan(BaseModel):
+class VideoPlan(Bible):
     title: str
-    visual_style: str = Field(description=(
-        "Film look: medium (e.g. photoreal cinematic), camera/film stock feel, "
-        "colour grade, depth of field, frame rate feel. Applies to every shot."))
-    setting: str = Field(description=(
-        "Exhaustive description of the location: architecture, furniture, props and "
-        "their exact positions, background details, time of day, weather."))
-    lighting: str = Field(description="Light sources, direction, quality and colour temperature.")
-    ambience: str = Field(description="Background sound ambience (no music, no speech).")
-    characters: list[Character]
     shots: list[Shot]
 
 
@@ -185,12 +190,13 @@ and the clips are cut together into one continuous video with the narration
 laid over the top.
 
 Veo has no memory between clips, so consistency must come from the prompts.
-Produce a production bible (visual style, setting, lighting, ambience,
-characters) that is extremely specific and concrete: exact colours, materials,
-positions, ages, hairstyles, clothing details. Never use vague words like
-"stylish" or "modern" without saying exactly what they look like. The bible
-will be repeated word-for-word in every clip prompt, so write it once, well,
-and keep each field dense (no filler).
+Produce a production bible (visual style, setting, lighting, characters) that
+is specific and concrete: exact colours, materials, positions, ages,
+hairstyles, clothing details. Never use vague words like "stylish" or "modern"
+without saying exactly what they look like. The bible is repeated word for
+word in every clip prompt, and Veo only reads about 900 words in total, so
+respect the word limit on every field. Write dense noun phrases, not full
+sentences; no filler, no repetition between fields.
 
 Then write exactly one shot per segment, in order, with the same index. Match
 the visuals to what is being said in that segment and to its duration. Keep
@@ -207,44 +213,79 @@ positions) and use smooth continuous camera movement. Do not plan cuts to new
 angles or new locations between shots."""
 
 
-def build_veo_prompt(plan: VideoPlan, shot: Shot, seg: Segment, n_segments: int,
-                     lip_sync: bool) -> str:
-    chars = "\n".join(
-        f"- {c.name}: {c.appearance} Wardrobe: {c.wardrobe} Mannerisms: {c.mannerisms}"
-        for c in plan.characters
-    )
+def bible_text(bible: Bible) -> str:
+    chars = "\n".join(f"- {c.name}: {c.appearance} Wearing: {c.wardrobe}" for c in bible.characters)
+    return (f"STYLE: {bible.visual_style}\n"
+            f"SETTING: {bible.setting}\n"
+            f"LIGHTING: {bible.lighting}\n"
+            f"CHARACTERS (identical in every clip):\n{chars}")
+
+
+def build_veo_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
     if shot.speaker_on_screen and lip_sync and seg.text:
-        who = shot.speaker_name or "The character"
-        dialogue = f'{who} speaks directly to camera, saying: "{seg.text}"'
+        dialogue = f'{shot.speaker_name or "The character"} says to camera: "{seg.text}"'
     else:
-        dialogue = ("No one on screen speaks; this shot plays under a voice-over. "
-                    "Mouths stay closed or move naturally without talking.")
+        dialogue = "Voice-over only; nobody on screen talks."
+    # Veo weighs the start of a prompt most, so the shot comes first and the
+    # shared bible follows. Captions etc. are handled by the negative prompt.
+    return (f"Single continuous {seg.duration}-second shot from one film; match the other clips exactly.\n"
+            f"CAMERA: {shot.camera}\n"
+            f"ACTION: {shot.action}\n"
+            f"EXPRESSION: {shot.expression}\n"
+            f"CONTINUITY: {shot.continuity}\n"
+            f"DIALOGUE: {dialogue}\n"
+            f"{bible_text(bible)}")
 
-    return f"""\
-A {seg.duration}-second single continuous shot. Clip {seg.index} of {n_segments} from the same film; it must match the other clips exactly.
 
-VISUAL STYLE: {plan.visual_style}
+def condense_bible(client, bible: Bible, max_chars: int) -> Bible:
+    """Ask Gemini to shorten the shared bible while keeping identity details."""
+    from google.genai import types
+    current = len(bible_text(bible))
+    log(f"Prompts too long for Veo; condensing the shared description "
+        f"from {current} to at most {max_chars} characters...")
+    resp = client.models.generate_content(
+        model=PROMPT_MODEL,
+        contents=(
+            f"Rewrite this production bible so that all its text fields together are at most "
+            f"{max_chars} characters (currently {current}). Keep character names unchanged. "
+            "Keep the details that make characters and the location recognisable: faces, "
+            "hair, skin tone, clothing colours, key props. Drop generic or redundant words. "
+            "Use dense noun phrases.\n\n" + bible.model_dump_json(indent=2)),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json", response_schema=Bible),
+    )
+    out = resp.parsed or Bible.model_validate_json(resp.text)
+    return Bible.model_validate(out.model_dump())
 
-SETTING (identical in every clip): {plan.setting}
 
-LIGHTING (identical in every clip): {plan.lighting}
+def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync: bool,
+                     max_chars: int = VEO_MAX_PROMPT_CHARS, attempts: int = 2) -> list[dict]:
+    shots = {s.index: s for s in plan.shots}
+    if len(shots) != len(segments):
+        log(f"Warning: planner returned {len(shots)} shots for {len(segments)} segments; "
+            "reusing the nearest shot where one is missing.")
+    pairs = [(seg, shots.get(seg.index) or plan.shots[min(seg.index, len(plan.shots)) - 1])
+             for seg in segments]
 
-CHARACTERS (look exactly like this in every clip):
-{chars}
+    bible = Bible.model_validate(plan.model_dump())
+    for attempt in range(attempts + 1):
+        prompts = [build_veo_prompt(bible, shot, seg, lip_sync) for seg, shot in pairs]
+        longest = max(len(p) for p in prompts)
+        if longest <= max_chars or attempt == attempts:
+            break
+        # Room left for the bible in the longest prompt, with a little slack.
+        room = max_chars - (longest - len(bible_text(bible))) - 100
+        if room < 400:
+            log("Warning: shot descriptions alone are close to Veo's limit; "
+                "consider shorter segments of narration.")
+            room = 400
+        bible = condense_bible(client, bible, room)
 
-CAMERA: {shot.camera}
-
-ACTION: {shot.action}
-
-EXPRESSION AND BODY LANGUAGE: {shot.expression}
-
-CONTINUITY: {shot.continuity}
-
-DIALOGUE: {dialogue}
-
-AUDIO: {plan.ambience}. No music.
-
-No subtitles, captions or on-screen text."""
+    for i, p in enumerate(prompts, 1):
+        if len(p) > max_chars:
+            log(f"Warning: prompt {i} is {len(p)} chars (limit ~{max_chars}); "
+                "Veo may ignore the end. Edit prompts.json to shorten it.")
+    return [{**seg.to_dict(), "prompt": p} for (seg, _), p in zip(pairs, prompts)]
 
 
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
@@ -284,17 +325,9 @@ SEGMENTS ({len(segments)} clips, write one shot for each):
     plan: VideoPlan = resp.parsed or VideoPlan.model_validate_json(resp.text)
     (run / "plan.json").write_text(plan.model_dump_json(indent=2))
 
-    shots = {s.index: s for s in plan.shots}
-    if len(shots) != len(segments):
-        log(f"Warning: planner returned {len(shots)} shots for {len(segments)} segments; "
-            "reusing the nearest shot where one is missing.")
-    out = []
-    for seg in segments:
-        shot = shots.get(seg.index) or plan.shots[min(seg.index, len(plan.shots)) - 1]
-        prompt = build_veo_prompt(plan, shot, seg, len(segments), lip_sync)
-        if len(prompt) > VEO_PROMPT_SOFT_LIMIT:
-            log(f"Warning: prompt {seg.index} is {len(prompt)} chars; Veo may ignore the tail.")
-        out.append({**seg.to_dict(), "prompt": prompt})
+    out = assemble_prompts(client, plan, segments, lip_sync)
+    longest = max(len(o["prompt"]) for o in out)
+    log(f"Built {len(out)} prompts (longest {longest} chars, limit ~{VEO_MAX_PROMPT_CHARS}).")
     prompts_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
     return out
 
@@ -316,12 +349,13 @@ def load_image(path: Path):
 
 def start_clip(client, item: dict, aspect: str, resolution: str, first_frame: Path | None):
     from google.genai import types
-    kwargs = {}
-    if first_frame is not None:
-        kwargs["image"] = load_image(first_frame)
+    source = types.GenerateVideosSource(
+        prompt=item["prompt"],
+        image=load_image(first_frame) if first_frame is not None else None,
+    )
     return client.models.generate_videos(
         model=VIDEO_MODEL,
-        prompt=item["prompt"],
+        source=source,
         config=types.GenerateVideosConfig(
             aspect_ratio=aspect,
             resolution=resolution,
@@ -329,7 +363,6 @@ def start_clip(client, item: dict, aspect: str, resolution: str, first_frame: Pa
             number_of_videos=1,
             negative_prompt=NEGATIVE_PROMPT,
         ),
-        **kwargs,
     )
 
 

@@ -38,16 +38,16 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
         def generate_content(self, model, contents, config):
             n = contents.count("\nSegment ")
             plan = mv.VideoPlan(
-                title="Bird feeder", visual_style="photoreal", setting="workshop",
-                lighting="sun", ambience="room tone",
-                characters=[mv.Character(name="Ana", appearance="40s", wardrobe="apron", mannerisms="calm")],
+                title="Bird feeder", visual_style="photoreal", setting="workshop", lighting="sun",
+                characters=[mv.Character(name="Ana", appearance="40s", wardrobe="apron")],
                 shots=[mv.Shot(index=i + 1, camera="medium", action="works", expression="smiles",
                                speaker_on_screen=True, speaker_name="Ana", continuity="same")
                        for i in range(n)])
             return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
 
-        def generate_videos(self, model, prompt, config, image=None):
-            calls["veo"].append({"duration": config.duration_seconds, "image": image is not None})
+        def generate_videos(self, model, source, config):
+            assert source.prompt
+            calls["veo"].append({"duration": config.duration_seconds, "image": source.image is not None})
             vid = SimpleNamespace(duration=config.duration_seconds)
             return SimpleNamespace(done=True, error=None,
                                    response=SimpleNamespace(generated_videos=[SimpleNamespace(video=vid)]))
