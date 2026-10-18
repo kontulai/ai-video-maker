@@ -34,7 +34,7 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(mv.requests, "post", fake_post)
 
     # --- fake Gemini + Veo ---
-    calls = {"veo": []}
+    calls = {"veo": [], "checks": 0}
 
     class FakeModels:
         def generate_content(self, model, contents, config):
@@ -49,6 +49,10 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
                                style="bullet", position="bottom-right"),  # moved to the left
                 ])
                 return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
+            if config.response_schema is mv.TextCheck:
+                calls["checks"] += 1
+                check = mv.TextCheck(has_text=False, where="")
+                return SimpleNamespace(parsed=check, text=check.model_dump_json())
             assert config.response_schema is mv.VideoPlan
             n = contents.count("\nSegment ")
             plan = mv.VideoPlan(
@@ -86,6 +90,7 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     assert [c["duration"] for c in calls["veo"]] == [p["duration"] for p in prompts]
     # Clip 1 starts from scratch; later clips start from the previous last frame.
     assert [c["image"] for c in calls["veo"]] == [False] + [True] * (len(prompts) - 1)
+    assert calls["checks"] == len(prompts)  # every clip was checked for lettering
     # Keyword graphics: one kept, the clip gets a layout hint, and they were burned in.
     callouts = json.loads((run / "callouts.json").read_text())
     assert [c["text"] for c in callouts["callouts"]] == ["Build it", "Point two"]

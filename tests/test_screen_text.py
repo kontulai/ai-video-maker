@@ -79,3 +79,67 @@ def test_every_prompt_forbids_text():
     assert mv.NO_TEXT_LINE in item["prompt"]
     assert "SALE" not in item["prompt"]
     assert "readable text" in mv.NEGATIVE_PROMPT
+
+
+def test_bible_text_is_stripped():
+    bible = mv.Bible(visual_style="photoreal", setting="Office with a poster reading 'THINK SECURE'.",
+                     lighting="soft", characters=[mv.Character(
+                         name="Maya", appearance="30s", wardrobe="Grey hoodie printed 'ACME CORP'.")])
+    text = mv.bible_text(mv.clean_bible(bible))
+    assert "THINK" not in text and "ACME" not in text
+
+
+def test_text_fix_goes_near_the_top():
+    out = mv.with_text_fix("Single shot.\nCAMERA: wide", "monitor screen")
+    assert out.splitlines()[1].startswith("FIX:") and "monitor screen" in out
+    assert out.endswith("CAMERA: wide")
+
+
+class _VeoClient:
+    """Fake Veo + Gemini: the first take of each clip shows text, retakes are clean."""
+    def __init__(self, texty_takes=1, **kw):
+        self.models, self.files, self.prompts = self, self, []
+        self.texty_takes, self.takes = texty_takes, 0
+
+    def generate_videos(self, model, source, config):
+        self.prompts.append(source.prompt)
+        vid = SimpleNamespace(take=len(self.prompts))
+        return SimpleNamespace(done=True, error=None,
+                               response=SimpleNamespace(generated_videos=[SimpleNamespace(video=vid)]))
+
+    def download(self, file, destination):
+        Path(destination).write_text(str(file.take))
+
+    def generate_content(self, model, contents, config):
+        assert config.response_schema is mv.TextCheck
+        take = int(contents[0].inline_data.data)
+        texty = take <= self.texty_takes
+        check = mv.TextCheck(has_text=texty, where="monitor screen" if texty else "")
+        return SimpleNamespace(parsed=check, text=check.model_dump_json())
+
+
+def _clips(tmp_path, monkeypatch, client, **kw):
+    import google.genai
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    monkeypatch.setattr(google.genai, "Client", lambda **_: client)
+    items = [{"index": 1, "duration": 4, "prompt": "Single shot.\nACTION: types"}]
+    return mv.generate_clips(items, tmp_path, "16:9", "720p", chain=False, start_image=None, **kw)
+
+
+def test_clip_with_text_is_retaken(tmp_path, monkeypatch):
+    client = _VeoClient(texty_takes=1)
+    [clip] = _clips(tmp_path, monkeypatch, client)
+    assert clip.read_text() == "2"  # the clean retake replaced the first take
+    assert "FIX:" not in client.prompts[0] and "monitor screen" in client.prompts[1]
+
+
+def test_retakes_stop_at_the_limit(tmp_path, monkeypatch):
+    client = _VeoClient(texty_takes=99)
+    _clips(tmp_path, monkeypatch, client, text_retries=2)
+    assert len(client.prompts) == 3
+
+
+def test_text_check_can_be_turned_off(tmp_path, monkeypatch):
+    client = _VeoClient(texty_takes=99)
+    _clips(tmp_path, monkeypatch, client, text_retries=0)
+    assert len(client.prompts) == 1

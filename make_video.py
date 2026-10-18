@@ -226,7 +226,9 @@ name what a screen, document, sign, badge or dialog says. Show meaning through
 colour coding (green, amber, red), simple icons (padlock, shield, warning
 triangle, folder, checkmark), blurred abstract interface shapes, actions and
 facial reactions. The important keywords are added later as separate motion
-graphics, so the footage itself must carry none.
+graphics, so the footage itself must carry none. This applies to the bible
+too: plain clothing with no logos, slogans or name badges, and no posters,
+signage, whiteboard writing, labelled boxes or book titles in the setting.
 
 Keep interactions physically realistic: people use keyboard, mouse or trackpad;
 desktop monitors are not touchscreens unless the brief says so.
@@ -329,6 +331,17 @@ def clean_shot(shot: Shot) -> Shot:
     return shot.model_copy(update={f: strip_screen_text(getattr(shot, f)) for f in SHOT_FIELDS})
 
 
+def clean_bible(bible: Bible) -> Bible:
+    chars = [c.model_copy(update={"appearance": strip_screen_text(c.appearance),
+                                  "wardrobe": strip_screen_text(c.wardrobe)})
+             for c in bible.characters]
+    return bible.model_copy(update={
+        "visual_style": strip_screen_text(bible.visual_style),
+        "setting": strip_screen_text(bible.setting),
+        "lighting": strip_screen_text(bible.lighting),
+        "characters": chars})
+
+
 def build_veo_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
     if shot.speaker_on_screen and lip_sync and seg.text:
         dialogue = f'{shot.speaker_name or "The character"} says to camera: "{seg.text}"'
@@ -377,7 +390,7 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
               for seg in segments]
     pairs = list(zip(segments, remove_screen_text(client, chosen)))
 
-    bible = Bible.model_validate(plan.model_dump())
+    bible = clean_bible(Bible.model_validate(plan.model_dump()))
     for attempt in range(attempts + 1):
         prompts = [build_veo_prompt(bible, shot, seg, lip_sync) for seg, shot in pairs]
         longest = max(len(p) for p in prompts)
@@ -527,8 +540,60 @@ def wait_and_save(client, operation, dest: Path) -> None:
     client.files.download(file=videos[0].video, destination=str(dest))
 
 
+TEXT_CHECK_MODEL = os.getenv("TEXT_CHECK_MODEL", PROMPT_MODEL)
+
+
+class TextCheck(BaseModel):
+    has_text: bool = Field(description=(
+        "True if any letters, words or numbers are visible in any frame, even garbled, "
+        "partial, blurry or tiny."))
+    where: str = Field(description=(
+        "Which surface shows the text and roughly where (e.g. 'monitor screen, centre'), "
+        "or empty if none."))
+
+
+TEXT_CHECK_INSTRUCTIONS = """\
+You check AI-generated video clips for unwanted text. Look at every frame for
+anything that looks like writing: words, letters, numbers, file names, labels,
+logos with lettering, signs, text on screens or paper, even garbled or
+half-formed glyphs. Ignore plain icons and symbols without letters (padlock,
+checkmark, warning triangle, shapes). Answer has_text and where.
+"""
+
+
+def find_text(client, clip: Path) -> str:
+    """Ask Gemini whether a clip shows any lettering. Returns where it is, or ""."""
+    from google.genai import types
+    try:
+        resp = client.models.generate_content(
+            model=TEXT_CHECK_MODEL,
+            contents=[types.Part.from_bytes(data=clip.read_bytes(), mime_type="video/mp4"),
+                      "Does this clip show any text?"],
+            config=types.GenerateContentConfig(
+                system_instruction=TEXT_CHECK_INSTRUCTIONS,
+                response_mime_type="application/json",
+                response_schema=TextCheck,
+            ),
+        )
+        check = resp.parsed or TextCheck.model_validate_json(resp.text)
+        check = TextCheck.model_validate(check.model_dump())
+    except Exception as e:  # noqa: BLE001 - a failed check must not stop the run
+        log(f"Warning: text check for {clip.name} failed ({e}); keeping the clip.")
+        return ""
+    return (check.where.strip() or "somewhere in frame") if check.has_text else ""
+
+
+def with_text_fix(prompt: str, where: str) -> str:
+    """Put a correction near the top of the prompt, where Veo weighs it most."""
+    first, _, rest = prompt.partition("\n")
+    fix = (f"FIX: the last take showed lettering ({where[:120]}); that surface must be blank "
+           "or show only colour blocks and simple icons.")
+    return f"{first}\n{fix}\n{rest}" if rest else f"{first}\n{fix}"
+
+
 def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
-                   chain: bool, start_image: Path | None, retries: int = 3) -> list[Path]:
+                   chain: bool, start_image: Path | None, retries: int = 3,
+                   text_retries: int = 2) -> list[Path]:
     from google import genai
 
     client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
@@ -543,14 +608,16 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
             return extract_last_frame(paths[i - 1], clip_dir / f"lastframe_{i:02d}.png")
         return None
 
-    def make(i: int) -> None:
-        item = items[i]
-        frame = first_frame_for(i)
+    def render(i: int, item: dict, frame: Path | None) -> None:
         for attempt in range(1, retries + 1):
             try:
                 log(f"Clip {item['index']}/{len(items)} ({item['duration']}s), attempt {attempt}...")
                 op = start_clip(client, item, aspect, resolution, frame)
-                wait_and_save(client, op, paths[i])
+                # Download beside the clip first so a failed retake never leaves a
+                # half-written or text-filled clip that --resume would skip.
+                tmp = paths[i].with_suffix(".new.mp4")
+                wait_and_save(client, op, tmp)
+                tmp.replace(paths[i])
                 log(f"Clip {item['index']} saved.")
                 return
             except Exception as e:  # noqa: BLE001 - surface any API failure and retry
@@ -561,6 +628,27 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                 time.sleep(5 * attempt)
         sys.exit(f"Clip {item['index']} failed {retries} times. "
                  f"Fix the prompt in {run / 'prompts.json'} and rerun with --resume {run}")
+
+    def check_text(i: int, frame: Path | None) -> None:
+        """Veo sometimes paints lettering anyway; retake the clip while Gemini sees any."""
+        if text_retries <= 0:
+            return
+        n = items[i]["index"]
+        for take in range(text_retries + 1):
+            where = find_text(client, paths[i])
+            if not where:
+                return
+            if take == text_retries:
+                log(f"Warning: clip {n} still shows text ({where}) after {text_retries} retake(s); "
+                    f"keeping it. Delete {paths[i]} and rerun with --resume {run} to try again.")
+                return
+            log(f"Clip {n} shows text ({where}); retaking ({take + 1}/{text_retries})...")
+            render(i, {**items[i], "prompt": with_text_fix(items[i]["prompt"], where)}, frame)
+
+    def make(i: int) -> None:
+        frame = first_frame_for(i)
+        render(i, items[i], frame)
+        check_text(i, frame)
 
     if chain:
         # Each clip needs the previous clip's last frame, so run in order.
@@ -583,6 +671,8 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
             except Exception as e:  # noqa: BLE001
                 log(f"Clip {items[i]['index']} failed ({e}); retrying on its own.")
                 make(i)
+                continue
+            check_text(i, start_image if i == 0 else None)
     return paths
 
 
@@ -694,6 +784,9 @@ def main() -> None:
                     help="Don't put the spoken line in the prompt (on-screen mouths won't move with the words).")
     ap.add_argument("--callouts", default="medium", choices=["off", "low", "medium", "high"],
                     help="How often keyword graphics pop up on screen (default: medium).")
+    ap.add_argument("--text-retries", type=int, default=2, metavar="N",
+                    help="Gemini watches each clip for lettering and Veo retakes it up to N times "
+                         "(default: 2; 0 turns the check off). Retakes cost Veo credits.")
     ap.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation before calling Veo.")
     args = ap.parse_args()
 
@@ -728,7 +821,8 @@ def main() -> None:
         items = confirm_prompts(items, run)
 
     # 5: clips
-    clips = generate_clips(items, run, args.aspect, args.resolution, chain, args.start_image)
+    clips = generate_clips(items, run, args.aspect, args.resolution, chain, args.start_image,
+                           text_retries=args.text_retries)
 
     # 6 + 7: assemble
     silent = concatenate(clips, run)

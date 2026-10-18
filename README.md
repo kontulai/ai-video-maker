@@ -41,6 +41,7 @@ Useful options:
 | `--no-lip-sync` | Don't put the spoken line in the prompt. Use for pure voice-over. |
 | `--resume runs/<id>` | Continue a run; finished steps and clips are skipped. |
 | `--callouts off\|low\|medium\|high` | How often keyword graphics pop up. Default `medium`, about one every 9 seconds. |
+| `--text-retries N` | Retake a clip up to N times when Gemini spots lettering in it. Default `2`; `0` turns the check off. Each retake costs a Veo generation. |
 | `-y` | Skip the confirmation before calling Veo. |
 
 ## How consistency is kept
@@ -64,6 +65,14 @@ They are animated motion graphics, not subtitles. They sit in a corner or the ce
 - **bullet**: one point of a list. Each point pops in with an accent marker as it is spoken, and the list stays up together until shortly after the last point.
 
 The Veo prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` and `CALLOUT_FONT_HEAVY` in `.env` to change the fonts. Use exact face names such as `Avenir Next Bold`, because asking for plain `Avenir Next` in bold picks the italic face on macOS.
+
+## No text in the footage
+
+Veo can't spell, so any words it draws come out garbled. The only text in the finished video should be the keyword graphics, which ffmpeg adds afterwards. Three things keep text out of the footage:
+
+- **Prompts.** Gemini is told never to name or quote what screens, papers, signs or badges say. Screens, documents and signs are shown with colour coding, simple icons and blurred shapes instead. Clothing has no logos and the setting has no posters or signage. Any quoted labels that slip through are rewritten by Gemini, and as a last resort the quoted words are removed. Every prompt also says no lettering anywhere, and the negative prompt bans text.
+- **Checking each clip.** After each clip is generated, Gemini watches it for any lettering, including garbled or partial letters. If it finds some, Veo retakes the clip with a note saying where the text appeared. The retake replaces the clip only when it succeeds. After `--text-retries` retakes the clip is kept with a warning. Delete the clip and use `--resume` to try again. Set `TEXT_CHECK_MODEL` to use a different Gemini model for the check.
+- **Limits.** Veo has no setting that guarantees zero text. Small or very blurry lettering can get past the check.
 
 ## Output
 
