@@ -49,7 +49,9 @@ CALLOUT_FONT = os.getenv("CALLOUT_FONT", "Avenir Next Bold")
 CALLOUT_FONT_HEAVY = os.getenv("CALLOUT_FONT_HEAVY", "Avenir Next Heavy")
 
 NEGATIVE_PROMPT = (
-    "subtitles, captions, on-screen text, watermark, logo, scene cut, jump cut, "
+    "subtitles, captions, on-screen text, readable text, words, letters, typography, "
+    "misspelled or garbled text, text on computer screens, signs with writing, "
+    "watermark, logo, scene cut, jump cut, fingers touching a desktop monitor, "
     "change of character appearance, change of wardrobe, change of hairstyle, "
     "change of location, extra people, distorted faces, deformed hands, low quality"
 )
@@ -217,6 +219,17 @@ the visuals to what is being said in that segment and to its duration. Keep
 the same characters, wardrobe and location in every shot unless the brief
 explicitly asks otherwise. Describe only things that can be shown in a single
 continuous take of that length.
+
+NO READABLE TEXT. Veo cannot spell: any words, titles, labels, file names,
+numbers or messages you ask for come out garbled. So never quote text and never
+name what a screen, document, sign, badge or dialog says. Show meaning through
+colour coding (green, amber, red), simple icons (padlock, shield, warning
+triangle, folder, checkmark), blurred abstract interface shapes, actions and
+facial reactions. The important keywords are added later as separate motion
+graphics, so the footage itself must carry none.
+
+Keep interactions physically realistic: people use keyboard, mouse or trackpad;
+desktop monitors are not touchscreens unless the brief says so.
 {chain_note}
 """
 
@@ -235,6 +248,87 @@ def bible_text(bible: Bible) -> str:
             f"CHARACTERS (identical in every clip):\n{chars}")
 
 
+NO_TEXT_LINE = ("TEXT: No legible words, letters or numbers anywhere in frame; screens, papers "
+                "and signs show only soft-focus abstract shapes, colour blocks and simple icons.")
+
+_QUOTE = r"""(?<![\w])['‘"“][^'‘’"“”\n]{1,80}?['’"”](?![\w])"""
+_QUOTE_RUN = rf"{_QUOTE}(?:\s*,\s*(?:and\s+|or\s+)?{_QUOTE}|\s+(?:and|or)\s+{_QUOTE})*"
+_QUOTE_LEAD = (r"(?:\s+(?:labell?ed|titled|named|called|reading|reads|that reads|which reads|"
+               r"saying|says|marked|headed|captioned|stamped|for|like|such as|with the (?:words?|text)|"
+               r"showing the (?:words?|text))(?:\s+(?:in|with)\s+[\w\- ]{1,25}?)?)?\s*:?\s*")
+
+
+_SCREENISH = re.compile(r"[A-Z0-9_/\\.@#%$]")
+
+
+def _strip_match(m: re.Match) -> str:
+    # Only quotes that look like screen text (capitals, digits, file names); keep
+    # ordinary quoted emphasis such as 'quick'.
+    quoted = re.findall(_QUOTE, m.group(0))
+    return " " if any(_SCREENISH.search(q[1:-1]) for q in quoted) else m.group(0)
+
+
+def has_screen_text(text: str) -> bool:
+    return any(_SCREENISH.search(q[1:-1]) for q in re.findall(_QUOTE, text))
+
+
+def strip_screen_text(text: str) -> str:
+    """Remove quoted on-screen text ('labeled "SALE"', titles, file names) that Veo would
+    render as garbled letters. Last-resort backstop after the planner rules and the
+    Gemini rewrite."""
+    out = re.sub(_QUOTE_LEAD + _QUOTE_RUN, _strip_match, text)
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)
+    out = re.sub(r":([.,;!?])", r"\1", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return out.strip()
+
+
+SHOT_FIELDS = ("camera", "action", "expression", "continuity")
+
+
+class ShotList(BaseModel):
+    shots: list[Shot]
+
+
+REWRITE_INSTRUCTIONS = """\
+These Google Veo shot descriptions ask for readable text (quoted words, titles,
+labels, file names, messages). Veo renders text as garbled letters, so rewrite
+each shot with no readable text at all. Keep everything else identical: same
+index, camera, characters, action and meaning. Replace text with colour coding,
+simple icons (padlock, shield, warning triangle, folder, checkmark), blurred
+abstract interface shapes and the characters' reactions. Never quote anything.
+"""
+
+
+def remove_screen_text(client, shots: list[Shot]) -> list[Shot]:
+    """Ask Gemini to rewrite shots that still contain on-screen text, then strip any
+    quoted text that is left."""
+    bad = [s for s in shots if any(has_screen_text(getattr(s, f)) for f in SHOT_FIELDS)]
+    if bad and client is not None:
+        from google.genai import types
+        log(f"Rewriting {len(bad)} shot(s) that ask for on-screen text (Veo garbles text)...")
+        try:
+            resp = client.models.generate_content(
+                model=PROMPT_MODEL,
+                contents=ShotList(shots=bad).model_dump_json(indent=2),
+                config=types.GenerateContentConfig(
+                    system_instruction=REWRITE_INSTRUCTIONS,
+                    response_mime_type="application/json",
+                    response_schema=ShotList,
+                ),
+            )
+            fixed = resp.parsed or ShotList.model_validate_json(resp.text)
+            by_index = {s.index: s for s in ShotList.model_validate(fixed.model_dump()).shots}
+            shots = [by_index.get(s.index, s) for s in shots]
+        except Exception as e:  # the regex backstop below still applies
+            log(f"Warning: shot rewrite failed ({e}); stripping quoted text instead.")
+    return [clean_shot(s) for s in shots]
+
+
+def clean_shot(shot: Shot) -> Shot:
+    return shot.model_copy(update={f: strip_screen_text(getattr(shot, f)) for f in SHOT_FIELDS})
+
+
 def build_veo_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
     if shot.speaker_on_screen and lip_sync and seg.text:
         dialogue = f'{shot.speaker_name or "The character"} says to camera: "{seg.text}"'
@@ -248,6 +342,7 @@ def build_veo_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> 
             f"EXPRESSION: {shot.expression}\n"
             f"CONTINUITY: {shot.continuity}\n"
             f"DIALOGUE: {dialogue}\n"
+            f"{NO_TEXT_LINE}\n"
             f"{bible_text(bible)}")
 
 
@@ -278,8 +373,9 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
     if len(shots) != len(segments):
         log(f"Warning: planner returned {len(shots)} shots for {len(segments)} segments; "
             "reusing the nearest shot where one is missing.")
-    pairs = [(seg, shots.get(seg.index) or plan.shots[min(seg.index, len(plan.shots)) - 1])
-             for seg in segments]
+    chosen = [shots.get(seg.index) or plan.shots[min(seg.index, len(plan.shots)) - 1]
+              for seg in segments]
+    pairs = list(zip(segments, remove_screen_text(client, chosen)))
 
     bible = Bible.model_validate(plan.model_dump())
     for attempt in range(attempts + 1):
