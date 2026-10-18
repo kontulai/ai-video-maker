@@ -43,8 +43,10 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
                 plan = fx.CalloutPlan(accent_color="#ff3366", callouts=[
                     fx.Callout(segment_index=1, text="Build it", anchor=" ".join(first[1:3]),
                                style="slam", position="top-left"),
-                    fx.Callout(segment_index=1, text="Duplicate", anchor="x",  # dropped: same clip
+                    fx.Callout(segment_index=1, text="Build it", anchor="x",  # duplicate: dropped
                                style="swipe", position="center"),
+                    fx.Callout(segment_index=1, text="Point two", anchor=first[-1],
+                               style="bullet", position="bottom-right"),  # moved to the left
                 ])
                 return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
             assert config.response_schema is mv.VideoPlan
@@ -86,8 +88,9 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     assert [c["image"] for c in calls["veo"]] == [False] + [True] * (len(prompts) - 1)
     # Keyword graphics: one kept, the clip gets a layout hint, and they were burned in.
     callouts = json.loads((run / "callouts.json").read_text())
-    assert [c["text"] for c in callouts["callouts"]] == ["Build it"]
-    assert "upper-left third" in prompts[0]["prompt"]
+    assert [c["text"] for c in callouts["callouts"]] == ["Build it", "Point two"]
+    assert callouts["callouts"][1]["position"] == "bottom-left"
+    assert "upper-left third and the lower-left third" in prompts[0]["prompt"]
     assert "uncluttered" not in prompts[1]["prompt"]
     ass = (run / "callouts.ass").read_text()
     assert "PlayResX: 320" in ass and "BUILD IT" in ass and "&H6633FF&" in ass

@@ -1,8 +1,8 @@
 """Infomercial-style keyword graphics burned on top of the video.
 
-Gemini picks a few moments worth emphasising (at most one per clip, most clips
-get none), a placement that avoids the action, and an accent colour taken from
-the film's own palette. Each graphic is timed to the exact spoken words using
+Gemini picks a few moments worth emphasising (most clips get none; a clip that
+lists several points can get a stacked bullet list), a placement that avoids the
+action, and an accent colour taken from the film's own palette. Each graphic is timed to the exact spoken words using
 the ElevenLabs word timings and rendered as animated motion graphics (an ASS
 file drawn by libass), so it reads as part of the edit rather than a subtitle.
 """
@@ -19,7 +19,9 @@ from segmentation import Segment, Word
 # Roughly how many seconds of video per graphic, by density setting.
 DENSITY_SECONDS = {"low": 15, "medium": 9, "high": 5}
 
-STYLES = ("slam", "swipe", "reveal")
+STYLES = ("slam", "swipe", "reveal", "bullet")
+MAX_PER_SEGMENT = 4
+BULLET_POSITIONS = ("top-left", "bottom-left", "center")  # lists stack from the left
 POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "center")
 
 # Plain-language area names used to tell Veo where to leave room.
@@ -33,6 +35,8 @@ MIN_SHOW = 1.8     # seconds a graphic stays up at minimum
 HOLD_AFTER = 1.2   # seconds it lingers after the anchor words are spoken
 LEAD_IN = 0.15     # appear just before the words are spoken
 GAP = 0.2          # space between two consecutive graphics
+BULLET_HOLD = 2.0  # a finished list stays up this long after its last point
+BULLET_JOIN = 6.0  # bullets less than this many seconds apart form one list
 DEFAULT_ACCENT = "#FFC400"
 
 
@@ -49,11 +53,15 @@ class Callout(BaseModel):
         "'slam': huge text that crashes in; best for 1-2 words, numbers, prices, offers. "
         "'swipe': label on a colour bar that wipes in, like a TV lower-third; best for "
         "product names, features, calls to action. "
-        "'reveal': letters appear one by one; best for a key idea or benefit."))
+        "'reveal': letters appear one by one; best for a key idea or benefit. "
+        "'bullet': one point of a list; when the narration lists 2-4 points, give each its "
+        "own 'bullet' callout (same position, in spoken order) and they stack up one by "
+        "one as they are spoken, then stay on screen together."))
     position: str = Field(description=(
         "One of 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'center'. Choose "
         "the area of the frame least likely to hold a face or the main action, based on "
-        "the shot description. Use 'center' only for 'slam' over a calm moment."))
+        "the shot description. Use 'center' only for 'slam' or 'bullet' over a calm moment. "
+        "'bullet' lists only use 'top-left', 'bottom-left' or 'center'."))
 
 
 class CalloutPlan(BaseModel):
@@ -69,10 +77,13 @@ animated text graphics that visualise the most important keywords. They must
 feel designed into the film, not like subtitles.
 
 Rules:
-- Be selective. Most segments get no graphic. Aim for about one graphic every
-  {every} seconds of video ({target} in total for this {total}s video), and
+- Be selective. Most segments get no graphic. Aim for about one graphic moment
+  every {every} seconds of video (about {target} for this {total}s video), and
   avoid graphics in two consecutive segments unless both are essential.
-- At most one graphic per segment.
+- Usually one graphic per segment, but use more when it makes sense: when the
+  narration lists several points (features, steps, benefits), show each as a
+  'bullet' (2 to 4 bullets, each anchored on the words that name that point).
+  A whole list counts as one moment. Never more than {max_per} per segment.
 - Pick what a viewer should remember: product names, numbers, prices, offers,
   key benefits, the call to action. Never transcribe sentences.
 - Text is 1 to 4 words, at most 22 characters. Rephrase for impact; write
@@ -100,7 +111,8 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
         model=model,
         contents=f"FILM LOOK: {visual_style}\n\nSEGMENTS:\n{seg_list}",
         config=types.GenerateContentConfig(
-            system_instruction=INSTRUCTIONS.format(every=every, target=target, total=total),
+            system_instruction=INSTRUCTIONS.format(every=every, target=target, total=total,
+                                                   max_per=MAX_PER_SEGMENT),
             response_mime_type="application/json",
             response_schema=CalloutPlan,
         ),
@@ -110,24 +122,33 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
     accent = plan.accent_color if re.fullmatch(r"#?[0-9a-fA-F]{6}", plan.accent_color or "") \
         else DEFAULT_ACCENT
 
-    # Enforce the rules in code too: one per segment, valid style/position.
-    seen: set[int] = set()
+    # Enforce the rules in code too: a per-segment cap, no duplicates, valid style/position.
+    per_seg: dict[int, int] = {}
+    seen: set[tuple[int, str]] = set()
     valid_idx = {s.index for s in segments}
     out = []
-    for c in sorted(plan.callouts, key=lambda c: c.segment_index):
-        if c.segment_index in seen or c.segment_index not in valid_idx or not c.text.strip():
+    for c in sorted(plan.callouts, key=lambda c: c.segment_index):  # stable: keeps spoken order
+        key = (c.segment_index, c.text.strip().lower())
+        if c.segment_index not in valid_idx or not c.text.strip() or key in seen \
+                or per_seg.get(c.segment_index, 0) >= MAX_PER_SEGMENT:
             continue
-        seen.add(c.segment_index)
+        seen.add(key)
+        per_seg[c.segment_index] = per_seg.get(c.segment_index, 0) + 1
         c.style = c.style if c.style in STYLES else "swipe"
         c.position = c.position if c.position in POSITIONS else "bottom-left"
+        if c.style == "bullet" and c.position not in BULLET_POSITIONS:
+            c.position = c.position.replace("right", "left")
         out.append(c)
     return "#" + accent.lstrip("#").upper(), out
 
 
-def layout_hint(callout: Callout) -> str:
-    """Sentence for the Veo prompt so the shot leaves room for the graphic."""
-    return (f"Compose the shot so the {POSITION_AREA[callout.position]} of the frame is "
-            "calm, uncluttered background with no faces or important action.")
+def layout_hint(callouts: list[Callout]) -> str:
+    """Sentence for the Veo prompt so the shot leaves room for the graphics."""
+    areas = list(dict.fromkeys(POSITION_AREA[c.position] for c in callouts))
+    where = " and the ".join(areas)
+    return (f"Compose the shot so the {where} of the frame "
+            f"{'is' if len(areas) == 1 else 'are'} calm, uncluttered background with no "
+            "faces or important action.")
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +162,8 @@ class TimedCallout:
     position: str
     start: float
     end: float
+    row: int = 0    # bullet lists: this item's line, and how many lines the list has
+    rows: int = 1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -177,13 +200,37 @@ def time_callouts(callouts: list[Callout], words: list[Word], segments: list[Seg
         start = max(0.0, span[0] - LEAD_IN)
         end = max(start + MIN_SHOW, span[1] + HOLD_AFTER)
         timed.append(TimedCallout(c.text.strip(), c.style, c.position, start, end))
-
     timed.sort(key=lambda t: t.start)
-    for cur, nxt in zip(timed, timed[1:]):
-        cur.end = min(cur.end, nxt.start - GAP)
+
+    # Consecutive bullets become one list: each line appears when spoken, and the
+    # whole list stays up together until a while after the last point.
+    groups: list[list[TimedCallout]] = []
     for t in timed:
-        t.end = min(t.end, video_length)
-    return [t for t in timed if t.end - t.start >= 0.6]
+        prev = groups[-1][-1] if groups else None
+        if (prev and t.style == prev.style == "bullet" and t.start - prev.start <= BULLET_JOIN
+                and len(groups[-1]) < MAX_PER_SEGMENT):
+            t.position = groups[-1][0].position
+            groups[-1].append(t)
+        else:
+            groups.append([t])
+    for g in groups:
+        if g[0].style == "bullet":
+            end = max(g[-1].end - HOLD_AFTER + BULLET_HOLD, g[-1].start + MIN_SHOW)
+            for row, t in enumerate(g):
+                t.row, t.rows, t.end = row, len(g), end
+
+    # A group ends before the next group starts.
+    for cur, nxt in zip(groups, groups[1:]):
+        limit = nxt[0].start - GAP
+        for t in cur:
+            t.end = min(t.end, limit)
+    out = []
+    for g in groups:
+        for t in g:
+            t.end = min(t.end, video_length)
+        if g[-1].end - g[-1].start >= 0.6 or g[0].style == "bullet" and g[0].end - g[0].start >= 0.6:
+            out.extend(t for t in g if t.end - t.start >= 0.4)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +272,7 @@ def _placement(position: str, w: int, h: int) -> tuple[int, int, int]:
     }[position]
 
 
-def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list[str]:
+def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: str) -> list[str]:
     base = min(w, h)
     an, x, y = _placement(t.position, w, h)
     dur = int((t.end - t.start) * 1000)
@@ -238,7 +285,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list
     if t.style == "slam":
         size = round(base * (0.21 if len(t.text) <= 8 else 0.15))
         text = _ass_escape(t.text.upper())
-        common = (f"\\an{an}\\fn{font}\\b1\\fs{size}\\fsp2\\bord0"
+        common = (f"\\an{an}\\fn{heavy}\\b0\\fs{size}\\fsp2\\bord0"
                   f"\\fscx175\\fscy175\\frz-7\\fad(0,220)"
                   f"\\t(0,170,0.6,\\fscx94\\fscy94\\frz-3)\\t(170,280,\\fscx100\\fscy100)"
                   f"\\t(280,{dur},\\fscx105\\fscy105)")
@@ -265,7 +312,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list
         else:
             clip0, clip1 = f"\\clip({x},0,{x},{h})", f"\\clip(0,0,{w},{h})"
             slide_from = x
-        common = f"\\an{an}\\fn{font}\\b1\\fs{size}\\fsp3\\shad0\\fad(0,200)"
+        common = f"\\an{an}\\fn{font}\\b0\\fs{size}\\fsp3\\shad0\\fad(0,200)"
         return [
             # Accent bar sized exactly to the text (opaque box style), wiping in.
             ev(0, f"{common}\\pos({x},{y})\\1c{ac}\\3c{ac}\\bord{pad}\\frz-1"
@@ -274,6 +321,9 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list
             ev(1, f"{common}\\move({slide_from},{y},{x},{y},120,360)\\bord0\\frz-1{clip1}"
                   f"\\1c{_text_on(accent)}\\alpha&HFF&\\t(120,260,\\alpha&H00&)", text),
         ]
+
+    if t.style == "bullet":
+        return _bullet(t, w, h, ac, font, ev)
 
     # reveal: letters appear one by one, the line drifts up, an accent bar grows under it.
     size = round(base * 0.09)
@@ -284,7 +334,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list
         for i, ch in enumerate(t.text)
     )
     drift = round(h * 0.015)
-    common = (f"\\an{an}\\fn{font}\\b1\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250)"
+    common = (f"\\an{an}\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250)"
               f"\\t(0,{dur},\\fscx104\\fscy104)")
     off = max(2, round(size * 0.04))
     return [
@@ -297,9 +347,42 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str) -> list
     ]
 
 
+def _bullet(t: TimedCallout, w: int, h: int, ac: str, font: str, ev) -> list[str]:
+    """One line of a stacked list: an accent marker pops in, the text slides in after it."""
+    base = min(w, h)
+    size = round(base * 0.07)
+    line_h = round(size * 1.5)
+    mx, my = round(w * 0.06), round(h * 0.09)
+    if t.position == "bottom-left":
+        cy = h - my - size // 2 - (t.rows - 1 - t.row) * line_h
+    elif t.position == "center":
+        cy = round(h / 2 + (t.row - (t.rows - 1) / 2) * line_h)
+    else:  # top-left
+        cy = my + size // 2 + t.row * line_h
+    mark = round(size * 0.42)
+    tx = mx + mark + round(size * 0.45)
+    text = _ass_escape(t.text)
+    square = f"m 0 0 l {mark} 0 {mark} {mark} 0 {mark}"
+    common = f"\\an4\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250)"
+    slide = round(size * 0.8)
+    off = max(2, round(size * 0.05))
+    return [
+        # Accent marker: pops in, spinning from 45 degrees to square.
+        ev(1, f"\\an5\\pos({mx + mark // 2},{cy})\\bord0\\shad0\\1c{ac}\\fad(0,250)"
+              f"\\fscx0\\fscy0\\frz45\\t(0,220,0.6,\\fscx115\\fscy115\\frz0)"
+              f"\\t(220,320,\\fscx100\\fscy100)\\p1", f"{square}{{\\p0}}"),
+        # Soft shadow, then the text, both sliding in from behind the marker.
+        ev(0, f"{common}\\move({tx - slide + off},{cy + off},{tx + off},{cy + off},80,380)"
+              f"\\clip({mx + mark},0,{w},{h})\\1c&H000000&\\alpha&HFF&\\t(80,380,\\alpha&H60&)"
+              f"\\blur{round(size * 0.15)}", text),
+        ev(1, f"{common}\\move({tx - slide},{cy},{tx},{cy},80,380)\\clip({mx + mark},0,{w},{h})"
+              f"\\1c&HFFFFFF&\\alpha&HFF&\\t(80,300,\\alpha&H00&)", text),
+    ]
+
+
 def _underline(an: int, x: int, y: int, size: int, text: str, ac: str, h: int, ev) -> str:
     """Accent bar under a 'reveal' graphic, growing from the anchored side."""
-    width = round(len(text) * size * 0.56)  # approximate text width; it is a design accent
+    width = round(len(text) * size * 0.5)  # approximate text width; it is a design accent
     thick = max(4, round(size * 0.09))
     gap = round(size * 0.14)
     if an in (7, 9):
@@ -316,10 +399,15 @@ def _underline(an: int, x: int, y: int, size: int, text: str, ac: str, h: int, e
                  f"\\p1", f"{shape}{{\\p0}}")
 
 
-def write_ass(timed: list[TimedCallout], width: int, height: int, accent: str, font: str) -> str:
+def write_ass(timed: list[TimedCallout], width: int, height: int, accent: str,
+              font: str = "Avenir Next Bold", heavy_font: str | None = None) -> str:
+    """font: face for labels; heavy_font: face for 'slam' (defaults to font).
+    Name exact faces (e.g. 'Avenir Next Bold'): asking libass for bold on a family
+    name can pick the italic face on macOS."""
+    heavy = heavy_font or font
     events = []
     for t in timed:
-        events.extend(_events_for(t, width, height, accent, font))
+        events.extend(_events_for(t, width, height, accent, font, heavy))
     return "\n".join([
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -335,9 +423,9 @@ def write_ass(timed: list[TimedCallout], width: int, height: int, accent: str, f
         # Neutral base styles; every event sets its own look with override tags.
         # "box" uses BorderStyle 3 so the swipe bar is an opaque box fitted to the text.
         f"Style: fx,{font},48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
-        "-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
+        "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
         f"Style: box,{font},48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
-        "-1,0,0,0,100,100,0,0,3,0,0,7,0,0,0,1",
+        "0,0,0,0,100,100,0,0,3,0,0,7,0,0,0,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

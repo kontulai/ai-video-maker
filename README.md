@@ -54,15 +54,16 @@ Veo's own generated audio is discarded. The ElevenLabs narration is the only sou
 
 ## Keyword graphics
 
-Gemini picks a few keywords worth showing, such as prices, numbers, product names or the call to action. Most clips get none, and never more than one each. Each graphic appears exactly when its words are spoken, using the ElevenLabs word timings.
+Gemini picks a few keywords worth showing, such as prices, numbers, product names or the call to action. Most clips get none. A clip can get several when it makes sense, for example a list of points shown as bullets. Each graphic appears exactly when its words are spoken, using the ElevenLabs word timings.
 
-They are animated motion graphics, not subtitles. They sit in a corner or the centre, away from faces, in one accent colour taken from the film's palette. Gemini chooses one of three looks for each:
+They are animated motion graphics, not subtitles. They sit in a corner or the centre, away from faces, in one accent colour taken from the film's palette. Gemini chooses one of four looks for each:
 
 - **slam**: huge tilted text that crashes in. For prices, numbers and offers.
 - **swipe**: a label on a colour bar that wipes in, like a TV lower-third. For product names and features.
 - **reveal**: letters type on and an accent line grows under them. For a key benefit.
+- **bullet**: one point of a list. Each point pops in with an accent marker as it is spoken, and the list stays up together until shortly after the last point.
 
-The Veo prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` in `.env` to change the font (default Avenir Next, any installed font works).
+The Veo prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` and `CALLOUT_FONT_HEAVY` in `.env` to change the fonts. Use exact face names such as `Avenir Next Bold`, because asking for plain `Avenir Next` in bold picks the italic face on macOS.
 
 ## Output
 

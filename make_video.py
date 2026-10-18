@@ -45,7 +45,8 @@ PROMPT_MODEL = os.getenv("PROMPT_MODEL", "gemini-4-argon")
 VIDEO_MODEL = os.getenv("VIDEO_MODEL", "veo-3.1-fast-generate-preview")
 ELEVEN_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVEN_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
-CALLOUT_FONT = os.getenv("CALLOUT_FONT", "Avenir Next")
+CALLOUT_FONT = os.getenv("CALLOUT_FONT", "Avenir Next Bold")
+CALLOUT_FONT_HEAVY = os.getenv("CALLOUT_FONT_HEAVY", "Avenir Next Heavy")
 
 NEGATIVE_PROMPT = (
     "subtitles, captions, on-screen text, watermark, logo, scene cut, jump cut, "
@@ -369,12 +370,14 @@ def plan_callouts(items: list[dict], segments: list[Segment], run: Path,
     log(f"Planned {len(chosen)} keyword graphics for {len(segments)} clips.")
 
     # Tell Veo to keep that part of the frame clear in the clips that get a graphic.
-    by_seg = {c.segment_index: c for c in chosen}
+    by_seg: dict[int, list] = {}
+    for c in chosen:
+        by_seg.setdefault(c.segment_index, []).append(c)
     changed = False
     for it in items:
-        c = by_seg.get(it["index"])
-        if c and "uncluttered background" not in it["prompt"]:
-            it["prompt"] = f"{it['prompt']}\n\n{fx.layout_hint(c)}"
+        cs = by_seg.get(it["index"])
+        if cs and "uncluttered background" not in it["prompt"]:
+            it["prompt"] = f"{it['prompt']}\n\n{fx.layout_hint(cs)}"
             changed = True
     if changed:
         (run / "prompts.json").write_text(json.dumps(items, indent=2, ensure_ascii=False))
@@ -513,7 +516,7 @@ def write_callouts_ass(callout_data: dict, alignment: dict, segments: list[Segme
     width, height = video_size(video)
     accent = callout_data.get("accent_color") or fx.DEFAULT_ACCENT
     path = run / "callouts.ass"
-    path.write_text(fx.write_ass(timed, width, height, accent, CALLOUT_FONT), encoding="utf-8")
+    path.write_text(fx.write_ass(timed, width, height, accent, CALLOUT_FONT, CALLOUT_FONT_HEAVY), encoding="utf-8")
     return path
 
 
