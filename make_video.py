@@ -9,7 +9,8 @@ Pipeline
      verbose, continuity-preserving Veo prompt for each one.
   5. Generate each segment with Veo 3.1 Fast.
   6. Concatenate the segments.
-  7. Lay the voice track over the final video.
+  7. Lay the voice track over the final video, with infomercial-style keyword
+     graphics (chosen by Gemini) burned in.
 
 Every step writes its output into a run folder (runs/<timestamp>/). Running
 again with --resume <folder> skips the steps that are already done, so a
@@ -34,6 +35,7 @@ import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+import callouts as fx
 from segmentation import Segment, plan_segments, words_from_alignment
 
 load_dotenv()
@@ -43,6 +45,7 @@ PROMPT_MODEL = os.getenv("PROMPT_MODEL", "gemini-4-argon")
 VIDEO_MODEL = os.getenv("VIDEO_MODEL", "veo-3.1-fast-generate-preview")
 ELEVEN_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVEN_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+CALLOUT_FONT = os.getenv("CALLOUT_FONT", "Avenir Next")
 
 NEGATIVE_PROMPT = (
     "subtitles, captions, on-screen text, watermark, logo, scene cut, jump cut, "
@@ -80,9 +83,9 @@ def read_multiline(question: str) -> str:
     return text
 
 
-def ffmpeg(*args: str) -> None:
+def ffmpeg(*args: str, cwd: Path | None = None) -> None:
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, cwd=cwd)
 
 
 def media_duration(path: Path) -> float:
@@ -94,6 +97,16 @@ def media_duration(path: Path) -> float:
         raise RuntimeError(f"Could not read duration of {path}")
     h, mnt, s = m.groups()
     return int(h) * 3600 + int(mnt) * 60 + float(s)
+
+
+def video_size(path: Path) -> tuple[int, int]:
+    """(width, height) of the first video stream, parsed from ffmpeg's header output."""
+    out = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)],
+                         capture_output=True, text=True).stderr
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", out)
+    if not m:
+        raise RuntimeError(f"Could not read video size of {path}")
+    return int(m.group(1)), int(m.group(2))
 
 
 def require_env(name: str) -> str:
@@ -332,6 +345,42 @@ SEGMENTS ({len(segments)} clips, write one shot for each):
     return out
 
 
+def plan_callouts(items: list[dict], segments: list[Segment], run: Path,
+                  density: str) -> dict | None:
+    """Ask Gemini which keywords deserve an on-screen graphic. Saved to callouts.json
+    (edit it freely; delete entries you don't want)."""
+    path = run / "callouts.json"
+    if density == "off":
+        return None
+    if path.exists():
+        return json.loads(path.read_text())
+
+    from google import genai
+
+    plan = json.loads((run / "plan.json").read_text()) if (run / "plan.json").exists() else {}
+    shots = {s["index"]: f"{s.get('camera', '')} {s.get('action', '')}".strip()
+             for s in plan.get("shots", [])}
+    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
+    log(f"Choosing on-screen keywords with {PROMPT_MODEL} (density: {density})...")
+    accent, chosen = fx.plan_callouts(client, PROMPT_MODEL, segments, shots,
+                                      plan.get("visual_style", ""), density)
+    data = {"accent_color": accent, "callouts": [c.model_dump() for c in chosen]}
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    log(f"Planned {len(chosen)} keyword graphics for {len(segments)} clips.")
+
+    # Tell Veo to keep that part of the frame clear in the clips that get a graphic.
+    by_seg = {c.segment_index: c for c in chosen}
+    changed = False
+    for it in items:
+        c = by_seg.get(it["index"])
+        if c and "uncluttered background" not in it["prompt"]:
+            it["prompt"] = f"{it['prompt']}\n\n{fx.layout_hint(c)}"
+            changed = True
+    if changed:
+        (run / "prompts.json").write_text(json.dumps(items, indent=2, ensure_ascii=False))
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Step 5: Veo clip generation
 # ---------------------------------------------------------------------------
@@ -455,15 +504,35 @@ def concatenate(clips: list[Path], run: Path) -> Path:
     return out
 
 
-def add_voice(video: Path, audio: Path, run: Path) -> Path:
+def write_callouts_ass(callout_data: dict, alignment: dict, segments: list[Segment],
+                       video: Path, length: float, run: Path) -> Path | None:
+    callouts = [fx.Callout.model_validate(c) for c in callout_data.get("callouts", [])]
+    timed = fx.time_callouts(callouts, words_from_alignment(alignment), segments, length)
+    if not timed:
+        return None
+    width, height = video_size(video)
+    accent = callout_data.get("accent_color") or fx.DEFAULT_ACCENT
+    path = run / "callouts.ass"
+    path.write_text(fx.write_ass(timed, width, height, accent, CALLOUT_FONT), encoding="utf-8")
+    return path
+
+
+def add_voice(video: Path, audio: Path, run: Path, overlay: Path | None = None) -> Path:
     out = run / "final.mp4"
     tail = 0.5  # keep a little picture after the last word
     length = min(media_duration(video), media_duration(audio) + tail)
-    log("Adding voice track...")
-    ffmpeg("-i", str(video), "-i", str(audio),
-           "-map", "0:v:0", "-map", "1:a:0",
-           "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-           "-t", f"{length:.3f}", "-movflags", "+faststart", str(out))
+    if overlay is None:
+        log("Adding voice track...")
+        vcodec = ["-c:v", "copy"]
+    else:
+        log("Adding voice track and keyword graphics...")
+        # The ass filter path is relative to cwd (avoids escaping issues in filter syntax).
+        vcodec = ["-vf", f"ass={overlay.name}", "-c:v", "libx264", "-preset", "medium",
+                  "-crf", "18", "-pix_fmt", "yuv420p"]
+    ffmpeg("-i", str(video.resolve()), "-i", str(audio.resolve()),
+           "-map", "0:v:0", "-map", "1:a:0", *vcodec, "-c:a", "aac", "-b:a", "192k",
+           "-t", f"{length:.3f}", "-movflags", "+faststart", str(out.resolve()),
+           cwd=run)
     return out
 
 
@@ -482,19 +551,29 @@ def get_text_input(run: Path, name: str, question: str, file_arg: str | None) ->
 
 def confirm_prompts(items: list[dict], run: Path) -> list[dict]:
     total = sum(i["duration"] for i in items)
+    callouts_path = run / "callouts.json"
     print("\n" + "=" * 78)
     for it in items:
         print(f"\n--- Clip {it['index']} | {it['start']}-{it['end']}s ({it['duration']}s) ---")
         print(it["prompt"])
     print("\n" + "=" * 78)
+    if callouts_path.exists():
+        data = json.loads(callouts_path.read_text())
+        print(f"Keyword graphics (accent {data.get('accent_color')}):")
+        for c in data.get("callouts", []):
+            print(f"  clip {c['segment_index']}: \"{c['text']}\"  [{c['style']}, {c['position']}]"
+                  f"  on \"{c['anchor']}\"")
+        if not data.get("callouts"):
+            print("  (none)")
+        print(f"Edit {callouts_path} to change them (any time before the final step).")
     print(f"{len(items)} clips, {total}s of video. Prompts saved in {run / 'prompts.json'}.")
     while True:
-        ans = input("Generate the clips with Veo now? [y]es / [e]dited the file, reload / [n]o: ").strip().lower()
+        ans = input("Generate the clips with Veo now? [y]es / [e]dited the files, reload / [n]o: ").strip().lower()
         if ans in ("y", "yes"):
             return items
         if ans in ("e", "edit"):
             items = json.loads((run / "prompts.json").read_text())
-            print("Reloaded prompts.json.")
+            print("Reloaded prompts.json (callouts.json is read again at the end).")
             continue
         sys.exit(f"Stopped before video generation. Resume later with: --resume {run}")
 
@@ -514,6 +593,8 @@ def main() -> None:
                          "Faster (clips run in parallel) but less consistent.")
     ap.add_argument("--no-lip-sync", action="store_true",
                     help="Don't put the spoken line in the prompt (on-screen mouths won't move with the words).")
+    ap.add_argument("--callouts", default="medium", choices=["off", "low", "medium", "high"],
+                    help="How often keyword graphics pop up on screen (default: medium).")
     ap.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation before calling Veo.")
     args = ap.parse_args()
 
@@ -543,6 +624,7 @@ def main() -> None:
         + f" = {segments[-1].end}s for {duration:.1f}s of audio")
     chain = not args.no_chain
     items = plan_prompts(scene, talk, segments, run, chain, not args.no_lip_sync)
+    callout_data = plan_callouts(items, segments, run, args.callouts)
     if not args.yes:
         items = confirm_prompts(items, run)
 
@@ -551,7 +633,12 @@ def main() -> None:
 
     # 6 + 7: assemble
     silent = concatenate(clips, run)
-    final = add_voice(silent, audio, run)
+    overlay = None
+    if callout_data:
+        callout_data = json.loads((run / "callouts.json").read_text())  # pick up manual edits
+        length = min(media_duration(silent), duration + 0.5)
+        overlay = write_callouts_ass(callout_data, alignment, segments, silent, length, run)
+    final = add_voice(silent, audio, run, overlay)
     log(f"Done: {final.resolve()}")
 
 

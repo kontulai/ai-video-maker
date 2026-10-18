@@ -40,6 +40,7 @@ Useful options:
 | `--no-chain` | Generate clips in parallel instead of starting each from the previous clip's last frame. Faster, less consistent. |
 | `--no-lip-sync` | Don't put the spoken line in the prompt. Use for pure voice-over. |
 | `--resume runs/<id>` | Continue a run; finished steps and clips are skipped. |
+| `--callouts off\|low\|medium\|high` | How often keyword graphics pop up. Default `medium`, about one every 9 seconds. |
 | `-y` | Skip the confirmation before calling Veo. |
 
 ## How consistency is kept
@@ -51,9 +52,21 @@ Useful options:
 
 Veo's own generated audio is discarded. The ElevenLabs narration is the only soundtrack.
 
+## Keyword graphics
+
+Gemini picks a few keywords worth showing, such as prices, numbers, product names or the call to action. Most clips get none, and never more than one each. Each graphic appears exactly when its words are spoken, using the ElevenLabs word timings.
+
+They are animated motion graphics, not subtitles. They sit in a corner or the centre, away from faces, in one accent colour taken from the film's palette. Gemini chooses one of three looks for each:
+
+- **slam**: huge tilted text that crashes in. For prices, numbers and offers.
+- **swipe**: a label on a colour bar that wipes in, like a TV lower-third. For product names and features.
+- **reveal**: letters type on and an accent line grows under them. For a key benefit.
+
+The Veo prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` in `.env` to change the font (default Avenir Next, any installed font works).
+
 ## Output
 
-Each run gets a folder under `runs/` containing the inputs, `voice.mp3`, `segments.json`, `plan.json`, `prompts.json`, `clips/`, and `final.mp4`.
+Each run gets a folder under `runs/` containing the inputs, `voice.mp3`, `segments.json`, `plan.json`, `prompts.json`, `callouts.json`, `clips/`, `callouts.ass`, and `final.mp4`.
 
 ## Tests
 

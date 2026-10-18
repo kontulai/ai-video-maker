@@ -1,6 +1,7 @@
 """Runs the whole pipeline with ElevenLabs, Gemini and Veo replaced by fakes."""
 import base64
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import google.genai
+import callouts as fx
 import make_video as mv
 from test_pipeline import SCRIPT, fake_alignment
 
@@ -36,6 +38,16 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
 
     class FakeModels:
         def generate_content(self, model, contents, config):
+            if config.response_schema is fx.CalloutPlan:
+                first = re.search(r'Narration: "([^"]+)"', contents).group(1).split()
+                plan = fx.CalloutPlan(accent_color="#ff3366", callouts=[
+                    fx.Callout(segment_index=1, text="Build it", anchor=" ".join(first[1:3]),
+                               style="slam", position="top-left"),
+                    fx.Callout(segment_index=1, text="Duplicate", anchor="x",  # dropped: same clip
+                               style="swipe", position="center"),
+                ])
+                return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
+            assert config.response_schema is mv.VideoPlan
             n = contents.count("\nSegment ")
             plan = mv.VideoPlan(
                 title="Bird feeder", visual_style="photoreal", setting="workshop", lighting="sun",
@@ -72,6 +84,13 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     assert [c["duration"] for c in calls["veo"]] == [p["duration"] for p in prompts]
     # Clip 1 starts from scratch; later clips start from the previous last frame.
     assert [c["image"] for c in calls["veo"]] == [False] + [True] * (len(prompts) - 1)
+    # Keyword graphics: one kept, the clip gets a layout hint, and they were burned in.
+    callouts = json.loads((run / "callouts.json").read_text())
+    assert [c["text"] for c in callouts["callouts"]] == ["Build it"]
+    assert "upper-left third" in prompts[0]["prompt"]
+    assert "uncluttered" not in prompts[1]["prompt"]
+    ass = (run / "callouts.ass").read_text()
+    assert "PlayResX: 320" in ass and "BUILD IT" in ass and "&H6633FF&" in ass
     final = run / "final.mp4"
     assert final.exists()
     assert abs(mv.media_duration(final) - (audio_len + 0.5)) < 0.3
