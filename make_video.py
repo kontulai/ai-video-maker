@@ -30,6 +30,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import imageio_ffmpeg
 import requests
@@ -609,31 +610,43 @@ TEXT_CHECK_MODEL = os.getenv("TEXT_CHECK_MODEL", PROMPT_MODEL)
 
 
 class TextCheck(BaseModel):
-    has_text: bool = Field(description=(
-        "True if any letters, words or numbers are visible in any frame, even garbled, "
-        "partial, blurry or tiny."))
+    amount: Literal["none", "minor", "too_much"] = Field(description=(
+        "none: no lettering at all. minor: only small, incidental lettering that a viewer "
+        "would not notice or that looks natural (a brand logo, UI buttons, icon labels, "
+        "a window title bar, tiny or blurred interface text). too_much: a lot of text, or "
+        "any prominent gibberish a viewer would notice (garbled headings, signs, captions, "
+        "lines of fake writing on screens or paper, misspelt words that draw the eye)."))
     where: str = Field(description=(
         "Which surface shows the text and roughly where (e.g. 'monitor screen, centre'), "
         "or empty if none."))
 
 
 TEXT_CHECK_INSTRUCTIONS = """\
-You check AI-generated video clips for unwanted text. Look at every frame for
-anything that looks like writing: words, letters, numbers, file names, labels,
-logos with lettering, signs, text on screens or paper, even garbled or
-half-formed glyphs. Ignore plain icons and symbols without letters (padlock,
-checkmark, warning triangle, shapes). Answer has_text and where.
+You check AI-generated video clips for distracting text. The only text in the
+finished video is added later as graphics, so writing the model painted into
+the footage is a problem when it draws attention, above all garbled gibberish.
+
+A small amount is fine and counts as "minor", for example:
+- a brand logo on the back of a monitor or laptop (e.g. a DELL logo, a circular logo)
+- desktop icon labels, a file explorer window, buttons and other small UI chrome
+- tiny, blurred or out-of-focus interface text in the background
+
+"too_much" means a lot of text, or prominent gibberish a viewer would notice:
+garbled headings or banners, signs, captions, documents or screens filled with
+lines of fake writing, misspelt words in focus. Plain icons and symbols without
+letters (padlock, checkmark, shapes) are not text. Answer amount and where.
 """
 
 
 def find_text(client, clip: Path) -> str:
-    """Ask Gemini whether a clip shows any lettering. Returns where it is, or ""."""
+    """Ask Gemini whether a clip shows too much lettering. Returns where it is, or ""
+    when the clip is clean or shows only minor lettering such as logos and buttons."""
     from google.genai import types
     try:
         resp = client.models.generate_content(
             model=TEXT_CHECK_MODEL,
             contents=[types.Part.from_bytes(data=clip.read_bytes(), mime_type="video/mp4"),
-                      "Does this clip show any text?"],
+                      "How much text does this clip show?"],
             config=types.GenerateContentConfig(
                 system_instruction=TEXT_CHECK_INSTRUCTIONS,
                 response_mime_type="application/json",
@@ -645,7 +658,9 @@ def find_text(client, clip: Path) -> str:
     except Exception as e:  # noqa: BLE001 - a failed check must not stop the run
         log(f"Warning: text check for {clip.name} failed ({e}); keeping the clip.")
         return ""
-    return (check.where.strip() or "somewhere in frame") if check.has_text else ""
+    if check.amount == "minor":
+        log(f"{clip.name}: minor lettering ({check.where.strip() or 'small'}); keeping it.")
+    return (check.where.strip() or "somewhere in frame") if check.amount == "too_much" else ""
 
 
 def with_text_fix(prompt: str, where: str) -> str:
@@ -717,10 +732,10 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
             if not where:
                 return
             if take == text_retries:
-                log(f"Warning: clip {n} still shows text ({where}) after {text_retries} retake(s); "
+                log(f"Warning: clip {n} still shows too much text ({where}) after {text_retries} retake(s); "
                     f"keeping it. Delete {paths[i]} and rerun with --resume {run} to try again.")
                 return
-            log(f"Clip {n} shows text ({where}); retaking ({take + 1}/{text_retries})...")
+            log(f"Clip {n} shows too much text ({where}); retaking ({take + 1}/{text_retries})...")
             render(i, {**items[i], "prompt": with_text_fix(items[i]["prompt"], where)},
                    previous_id, scene_len, frame)
 

@@ -99,9 +99,9 @@ def test_text_fix_goes_near_the_top():
 
 class _OmniClient:
     """Fake Omni + Gemini: the first `texty_takes` takes show text, later ones are clean."""
-    def __init__(self, texty_takes=1):
+    def __init__(self, texty_takes=1, amount="too_much"):
         self.models, self.interactions = self, FakeInteractions()
-        self.texty_takes = texty_takes
+        self.texty_takes, self.amount = texty_takes, amount
 
     @property
     def prompts(self):
@@ -113,7 +113,8 @@ class _OmniClient:
         assert contents[0].inline_data.mime_type == "video/mp4"
         # The check always looks at the newest take.
         texty = len(self.interactions.bodies) <= self.texty_takes
-        check = mv.TextCheck(has_text=texty, where="monitor screen" if texty else "")
+        check = mv.TextCheck(amount=self.amount if texty else "none",
+                             where="monitor screen" if texty else "")
         return SimpleNamespace(parsed=check, text=check.model_dump_json())
 
 
@@ -157,6 +158,12 @@ def test_retakes_stop_at_the_limit(tmp_path, monkeypatch):
     client = _OmniClient(texty_takes=99)
     _clips(tmp_path, monkeypatch, client, text_retries=2)
     assert len(client.prompts) == 3
+
+
+def test_minor_lettering_like_logos_is_kept(tmp_path, monkeypatch):
+    client = _OmniClient(texty_takes=99, amount="minor")
+    _clips(tmp_path, monkeypatch, client, text_retries=2)
+    assert len(client.prompts) == 1
 
 
 def test_text_check_can_be_turned_off(tmp_path, monkeypatch):

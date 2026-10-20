@@ -56,7 +56,7 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
                 return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
             if config.response_schema is mv.TextCheck:
                 calls["checks"] += 1
-                check = mv.TextCheck(has_text=False, where="")
+                check = mv.TextCheck(amount="none", where="")
                 return SimpleNamespace(parsed=check, text=check.model_dump_json())
             assert config.response_schema is mv.VideoPlan
             n = contents.count("\nSegment ")
