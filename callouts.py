@@ -24,7 +24,7 @@ MAX_PER_SEGMENT = 4
 BULLET_POSITIONS = ("top-left", "bottom-left", "center")  # lists stack from the left
 POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "center")
 
-# Plain-language area names used to tell Veo where to leave room.
+# Plain-language area names used to tell the video model where to leave room.
 POSITION_AREA = {
     "top-left": "upper-left third", "top-right": "upper-right third",
     "bottom-left": "lower-left third", "bottom-right": "lower-right third",
@@ -143,7 +143,7 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
 
 
 def layout_hint(callouts: list[Callout]) -> str:
-    """Sentence for the Veo prompt so the shot leaves room for the graphics."""
+    """Sentence for the clip prompt so the shot leaves room for the graphics."""
     areas = list(dict.fromkeys(POSITION_AREA[c.position] for c in callouts))
     where = " and the ".join(areas)
     return (f"Compose the shot so the {where} of the frame "

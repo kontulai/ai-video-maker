@@ -1,4 +1,5 @@
-"""Veo garbles text, so shot descriptions must never ask for readable words."""
+"""Video models garble text, so shot descriptions must never ask for readable words."""
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,8 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import make_video as mv
 from segmentation import Segment
+from fake_omni import FakeInteractions
 
-# Real examples from a run where Veo rendered "EXTERNAL SHARE BOLCKED".
+# Real examples from a run where the video model rendered "EXTERNAL SHARE BOLCKED".
 CASES = {
     "Maya opens a dashboard titled 'DATA PRIVACY ARCHITECTURE' showing file icons.":
         "Maya opens a dashboard showing file icons.",
@@ -95,51 +97,69 @@ def test_text_fix_goes_near_the_top():
     assert out.endswith("CAMERA: wide")
 
 
-class _VeoClient:
-    """Fake Veo + Gemini: the first take of each clip shows text, retakes are clean."""
-    def __init__(self, texty_takes=1, **kw):
-        self.models, self.files, self.prompts = self, self, []
-        self.texty_takes, self.takes = texty_takes, 0
+class _OmniClient:
+    """Fake Omni + Gemini: the first `texty_takes` takes show text, later ones are clean."""
+    def __init__(self, texty_takes=1):
+        self.models, self.interactions = self, FakeInteractions()
+        self.texty_takes = texty_takes
 
-    def generate_videos(self, model, source, config):
-        self.prompts.append(source.prompt)
-        vid = SimpleNamespace(take=len(self.prompts))
-        return SimpleNamespace(done=True, error=None,
-                               response=SimpleNamespace(generated_videos=[SimpleNamespace(video=vid)]))
-
-    def download(self, file, destination):
-        Path(destination).write_text(str(file.take))
+    @property
+    def prompts(self):
+        return [b["input"] if isinstance(b["input"], str) else b["input"][-1]["text"]
+                for b in self.interactions.bodies]
 
     def generate_content(self, model, contents, config):
         assert config.response_schema is mv.TextCheck
-        take = int(contents[0].inline_data.data)
-        texty = take <= self.texty_takes
+        assert contents[0].inline_data.mime_type == "video/mp4"
+        # The check always looks at the newest take.
+        texty = len(self.interactions.bodies) <= self.texty_takes
         check = mv.TextCheck(has_text=texty, where="monitor screen" if texty else "")
         return SimpleNamespace(parsed=check, text=check.model_dump_json())
 
 
-def _clips(tmp_path, monkeypatch, client, **kw):
+ITEMS = [{"index": 1, "duration": 4, "scene": 1, "step": 0, "prompt": "Single shot.\nACTION: types"},
+         {"index": 2, "duration": 3, "scene": 1, "step": 1,
+          "prompt": "Extend this video by 3 seconds as the same continuous shot; no cut.\nACTION: x"}]
+
+
+def _clips(tmp_path, monkeypatch, client, items=ITEMS[:1], **kw):
     import google.genai
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     monkeypatch.setattr(google.genai, "Client", lambda **_: client)
-    items = [{"index": 1, "duration": 4, "prompt": "Single shot.\nACTION: types"}]
-    return mv.generate_clips(items, tmp_path, "16:9", "720p", chain=False, start_image=None, **kw)
+    monkeypatch.setattr(mv, "POLL_SECONDS", 0)
+    return mv.generate_clips(items, tmp_path, "16:9", "720p", start_image=None, **kw)
+
+
+def _saved_interaction(tmp_path, n):
+    return json.loads((tmp_path / "clips" / "steps.json").read_text())[str(n)]["interaction"]
 
 
 def test_clip_with_text_is_retaken(tmp_path, monkeypatch):
-    client = _VeoClient(texty_takes=1)
+    client = _OmniClient(texty_takes=1)
     [clip] = _clips(tmp_path, monkeypatch, client)
-    assert clip.read_text() == "2"  # the clean retake replaced the first take
+    assert _saved_interaction(tmp_path, 1) == "int-2"  # the clean retake replaced the first take
+    assert abs(mv.media_duration(clip) - 4) < 0.1
     assert "FIX:" not in client.prompts[0] and "monitor screen" in client.prompts[1]
 
 
+def test_text_retake_of_an_extension_extends_the_same_take(tmp_path, monkeypatch):
+    client = _OmniClient(texty_takes=0)
+    _clips(tmp_path, monkeypatch, client, items=ITEMS)
+    client.texty_takes = 99  # pretend the extension, not the first take, showed text
+    (tmp_path / "clips" / "clip_02.mp4").unlink()
+    _clips(tmp_path, monkeypatch, client, items=ITEMS, text_retries=1)
+    bodies = client.interactions.bodies[2:]
+    assert len(bodies) == 2
+    assert all(b["previous_interaction_id"] == "int-1" for b in bodies)
+
+
 def test_retakes_stop_at_the_limit(tmp_path, monkeypatch):
-    client = _VeoClient(texty_takes=99)
+    client = _OmniClient(texty_takes=99)
     _clips(tmp_path, monkeypatch, client, text_retries=2)
     assert len(client.prompts) == 3
 
 
 def test_text_check_can_be_turned_off(tmp_path, monkeypatch):
-    client = _VeoClient(texty_takes=99)
+    client = _OmniClient(texty_takes=99)
     _clips(tmp_path, monkeypatch, client, text_retries=0)
     assert len(client.prompts) == 1

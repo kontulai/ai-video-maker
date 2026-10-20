@@ -5,9 +5,9 @@ Turns a scene description and a talk track into a narrated video:
 1. Asks for the setting / scene description.
 2. Asks for the talk track.
 3. Creates the voice track with **ElevenLabs** (with per-character timings).
-4. Splits the talk track into **4, 6 or 8 s** segments and has **Gemini 4 Argon** write a verbose Veo prompt for each one.
-5. Generates each segment with **Veo 3.1 Fast**.
-6. Concatenates the segments.
+4. Splits the talk track into **3 to 10 s** steps, grouped into scenes of up to 40 s, and has **Gemini 4 Argon** write a verbose prompt for each step.
+5. Generates each scene as one continuous video with **Gemini Omni 1.1 Flash**: the first step is a new take and every later step **extends** that same video.
+6. Joins the steps.
 7. Lays the voice track over the final video.
 
 ## Setup
@@ -18,7 +18,7 @@ cp .env.example .env   # then fill in GEMINI_API_KEY and ELEVENLABS_API_KEY
 ```
 
 ffmpeg is bundled through `imageio-ffmpeg`, so nothing else needs installing.
-Gemini 4 Argon and Veo need the paid tier of the Gemini API.
+Gemini 4 Argon and Gemini Omni need the paid tier of the Gemini API.
 
 ## Run
 
@@ -27,7 +27,7 @@ Gemini 4 Argon and Veo need the paid tier of the Gemini API.
 ```
 
 You'll be asked for the scene and the talk track (finish each with a line containing `END`).
-Before any Veo clip is generated, the script prints every prompt and asks for confirmation.
+Before any video is generated, the script prints every prompt and asks for confirmation.
 You can edit `prompts.json` in the run folder at that point and choose "reload".
 
 Useful options:
@@ -37,21 +37,23 @@ Useful options:
 | `--scene-file F`, `--script-file F` | Read inputs from files instead of asking. |
 | `--start-image img.png` | Use an image as the first frame of clip 1, to lock in the character's look. |
 | `--aspect 9:16` | Vertical video. |
-| `--no-chain` | Generate clips in parallel instead of starting each from the previous clip's last frame. Faster, less consistent. |
+| `--max-scene S` | Longest scene in seconds, 10 to 40 (default `40`, Omni's limit for extending one video). Shorter means more fresh takes. |
+| `--resolution R` | `360p`, `720p` (default), `1080p` or `4k`. |
 | `--no-lip-sync` | Don't put the spoken line in the prompt. Use for pure voice-over. |
 | `--resume runs/<id>` | Continue a run; finished steps and clips are skipped. |
 | `--callouts off\|low\|medium\|high` | How often keyword graphics pop up. Default `medium`, about one every 9 seconds. |
-| `--text-retries N` | Retake a clip up to N times when Gemini spots lettering in it. Default `2`; `0` turns the check off. Each retake costs a Veo generation. |
-| `-y` | Skip the confirmation before calling Veo. |
+| `--text-retries N` | Retake a clip up to N times when Gemini spots lettering in it. Default `2`; `0` turns the check off. Each retake costs a video generation. |
+| `-y` | Skip the confirmation before generating video. |
 
 ## How consistency is kept
 
 - **Production bible.** Gemini writes one exhaustive description of the visual style, setting, lighting and each character (face, hair, build, exact wardrobe). The script pastes it **word for word** into every clip prompt, so no clip can drift from it.
-- **Frame chaining (default).** Each clip starts from the last frame of the previous clip, so people, clothes and the room carry over pixel-for-pixel. Gemini is told to plan continuous camera moves rather than cuts.
-- **Negative prompt.** Every clip forbids captions, cuts, wardrobe or location changes and extra people.
-- **Timing.** Segments are cut at even seconds chosen to fall in pauses, preferring sentence ends, so each clip shows what is being said at that moment. When a character speaks on screen, their line goes in the prompt so the mouth moves roughly in time.
+- **Extending, not cutting.** A scene is one Omni video. Its first step is generated, and each later step extends that video, so the model sees everything that came before and people, props and the room carry over. Gemini plans each step as a continuation of the same shot, not a new one. A talk track longer than one scene (40 s) gets several scenes. The scene breaks fall at sentence ends where possible, and each new scene starts from the last frame of the previous one.
+- **No AI slop.** Gemini is told that nothing may appear, vanish or change by itself. Every object must be in the production bible from the start or be visibly carried in. Omni has no negative-prompt setting, so every prompt ends with an `AVOID:` line. It bans objects suddenly appearing or vanishing, morphing or duplicated props, warping hands and faces, flickering textures, nonsensical clutter, impossible physics and the glossy plastic AI look. It also bans captions, cuts, wardrobe or location changes and extra people.
+- **Timing.** Steps are cut at whole seconds chosen to fall in pauses, preferring sentence ends, so each step shows what is being said at that moment. Each step is trimmed, or padded with its last frame, to its exact length so the picture stays in sync with the narration. When a character speaks on screen, their line goes in the prompt so the mouth moves roughly in time.
+- **Resuming.** The interaction id of each step is saved in `clips/steps.json`, so `--resume` can carry on extending a scene. If an extension keeps failing, the script starts a new take from the previous step's last frame.
 
-Veo's own generated audio is discarded. The ElevenLabs narration is the only soundtrack.
+The video model's own generated audio is discarded. The ElevenLabs narration is the only soundtrack.
 
 ## Keyword graphics
 
@@ -64,15 +66,15 @@ They are animated motion graphics, not subtitles. They sit in a corner or the ce
 - **reveal**: letters type on and an accent line grows under them. For a key benefit.
 - **bullet**: one point of a list. Each point pops in with an accent marker as it is spoken, and the list stays up together until shortly after the last point.
 
-The Veo prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` and `CALLOUT_FONT_HEAVY` in `.env` to change the fonts. Use exact face names such as `Avenir Next Bold`, because asking for plain `Avenir Next` in bold picks the italic face on macOS.
+The video prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` and `CALLOUT_FONT_HEAVY` in `.env` to change the fonts. Use exact face names such as `Avenir Next Bold`, because asking for plain `Avenir Next` in bold picks the italic face on macOS.
 
 ## No text in the footage
 
-Veo can't spell, so any words it draws come out garbled. The only text in the finished video should be the keyword graphics, which ffmpeg adds afterwards. Three things keep text out of the footage:
+Video models can't spell, so any words they draw come out garbled. The only text in the finished video should be the keyword graphics, which ffmpeg adds afterwards. Three things keep text out of the footage:
 
-- **Prompts.** Gemini is told never to name or quote what screens, papers, signs or badges say. Screens, documents and signs are shown with colour coding, simple icons and blurred shapes instead. Clothing has no logos and the setting has no posters or signage. Any quoted labels that slip through are rewritten by Gemini, and as a last resort the quoted words are removed. Every prompt also says no lettering anywhere, and the negative prompt bans text.
-- **Checking each clip.** After each clip is generated, Gemini watches it for any lettering, including garbled or partial letters. If it finds some, Veo retakes the clip with a note saying where the text appeared. The retake replaces the clip only when it succeeds. After `--text-retries` retakes the clip is kept with a warning. Delete the clip and use `--resume` to try again. Set `TEXT_CHECK_MODEL` to use a different Gemini model for the check.
-- **Limits.** Veo has no setting that guarantees zero text. Small or very blurry lettering can get past the check.
+- **Prompts.** Gemini is told never to name or quote what screens, papers, signs or badges say. Screens, documents and signs are shown with colour coding, simple icons and blurred shapes instead. Clothing has no logos and the setting has no posters or signage. Any quoted labels that slip through are rewritten by Gemini, and as a last resort the quoted words are removed. Every prompt also says no lettering anywhere, and the `AVOID:` line bans text.
+- **Checking each clip.** After each clip is generated, Gemini watches it for any lettering, including garbled or partial letters. If it finds some, the step is retaken (from the same point in the scene) with a note saying where the text appeared. The retake replaces the clip only when it succeeds. After `--text-retries` retakes the clip is kept with a warning. Delete the clip and use `--resume` to try again. Set `TEXT_CHECK_MODEL` to use a different Gemini model for the check.
+- **Limits.** Omni has no setting that guarantees zero text. Small or very blurry lettering can get past the check.
 
 ## Output
 
