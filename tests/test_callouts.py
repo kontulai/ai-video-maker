@@ -16,14 +16,51 @@ WORDS = _words("Get fifty percent off today. Free shipping on every single order
 SEGS = [Segment(1, 0, 4, 4, ""), Segment(2, 4, 8, 4, "")]
 
 
-def _c(seg, anchor, text="X", style="slam", position="center"):
-    return fx.Callout(segment_index=seg, text=text, anchor=anchor, style=style, position=position)
+def _c(seg, anchor, text="X", style="slam", position="center", list_name=""):
+    return fx.Callout(segment_index=seg, text=text, anchor=anchor, style=style,
+                      position=position, list_name=list_name)
 
 
-def test_starts_just_before_anchor_words():
-    [t] = fx.time_callouts([_c(1, "fifty percent,")], WORDS, SEGS, 8)
+def test_starts_just_before_anchor_words_and_lingers():
+    [t] = fx.time_callouts([_c(1, "fifty percent,")], WORDS, SEGS, 12)
     assert abs(t.start - (0.5 - fx.LEAD_IN)) < 1e-6
-    assert t.end >= t.start + fx.MIN_SHOW
+    assert abs(t.end - (1.4 + fx.HOLD_AFTER)) < 1e-6   # stays up well after the words
+
+
+def test_stays_up_until_the_next_graphic_needs_its_area():
+    # Same half of the frame: the first clears just before the second appears.
+    a, b = fx.time_callouts([_c(1, "Get", position="top-left"),
+                             _c(2, "guaranteed", position="top-right")], WORDS, SEGS, 12)
+    assert abs(a.end - (b.start - fx.GAP)) < 1e-6
+    # Other half: a headline stays up over the point below it.
+    a, b = fx.time_callouts([_c(1, "Get", position="top-left"),
+                             _c(2, "guaranteed", position="bottom-left")], WORDS, SEGS, 12)
+    assert a.end > b.start + 1
+    # The centre shares the screen with nothing.
+    a, b = fx.time_callouts([_c(1, "Get", position="top-left"),
+                             _c(2, "guaranteed", position="center")], WORDS, SEGS, 12)
+    assert abs(a.end - (b.start - fx.GAP)) < 1e-6
+
+
+def test_headline_stays_over_successive_points():
+    a, b, c = fx.time_callouts([_c(1, "Get", position="top-left"),
+                                _c(1, "today.", position="bottom-left"),
+                                _c(2, "every", position="bottom-right")], WORDS, SEGS, 12)
+    assert a.end > c.start + 1                         # the headline outlasts both points
+    assert abs(b.end - (c.start - fx.GAP)) < 1e-6      # same half: replaced
+    assert abs(a.end - (0.4 + fx.HOLD_AFTER)) < 1e-6   # until its hold runs out
+
+
+def test_long_list_is_not_cut_by_graphics_in_the_other_half():
+    words = _words("one two three four", step=4.0)
+    segs = [Segment(1, 0, 16, 16, "")]
+    timed = fx.time_callouts([_c(1, "one", style="bullet", position="bottom-left", list_name="t"),
+                              _c(1, "two", style="reveal", position="top-left"),
+                              _c(1, "three", style="bullet", position="bottom-left", list_name="t"),
+                              _c(1, "four", style="reveal", position="top-right")], words, segs, 20)
+    rows = [t for t in timed if t.style == "bullet"]
+    assert [(t.row, t.rows) for t in rows] == [(0, 2), (1, 2)]
+    assert rows[0].end == rows[1].end >= 12
 
 
 def test_prefers_match_inside_its_segment_and_falls_back():
@@ -58,11 +95,37 @@ def test_bullets_stack_and_stay_up_together():
     assert bullets[-1].end <= slam.start - fx.GAP + 1e-9     # cleared before the next graphic
 
 
-def test_far_apart_bullets_are_separate_lists():
+def test_far_apart_bullets_are_separate_lists_unless_named():
     words = _words("one " + "pad " * 20 + "two")
+    segs = [Segment(1, 0, 8, 8, ""), Segment(2, 8, 12, 4, "")]
     timed = fx.time_callouts([_c(1, "one", style="bullet"), _c(2, "two", style="bullet")],
-                             words, [Segment(1, 0, 8, 8, ""), Segment(2, 8, 12, 4, "")], 12)
+                             words, segs, 12)
     assert [t.rows for t in timed] == [1, 1]
+    timed = fx.time_callouts([_c(1, "one", style="bullet", list_name="factors"),
+                              _c(2, "two", style="bullet", list_name="factors")], words, segs, 12)
+    assert [(t.row, t.rows) for t in timed] == [(0, 2), (1, 2)]   # one list across segments
+    close = _words("one two", step=3.0)
+    timed = fx.time_callouts([_c(1, "one", style="bullet", list_name="factors"),
+                              _c(1, "two", style="bullet", list_name="tiers")], close, segs, 12)
+    assert [t.rows for t in timed] == [1, 1]                      # different lists never join
+    timed = fx.time_callouts([_c(1, "one", style="bullet"), _c(1, "two", style="bullet")],
+                             close, segs, 12)
+    assert [t.rows for t in timed] == [2, 2]                      # unnamed, close: one list
+
+
+def test_items_of_a_named_list_share_the_first_items_look():
+    out = fx.enforce_rules([
+        _c(2, "a", "3 KEY FACTORS", "slam", "top-left"),
+        _c(2, "b", "Sensitivity", "reveal", "bottom-left", "Key Factors"),
+        _c(3, "c", "Business value", "bullet", "top-left", "key factors"),
+        _c(3, "d", "Regulations", "swipe", "center", "key factors"),
+        _c(4, "e", "Public", "bullet", "bottom-right", "tiers"),
+        _c(5, "f", "Internal", "slam", "top-right", "tiers"),
+    ], {2, 3, 4, 5})
+    assert [(c.style, c.position, c.list_name) for c in out[1:4]] == \
+        [("reveal", "bottom-left", "key factors")] * 3
+    assert [(c.style, c.position) for c in out[4:]] == [("bullet", "bottom-left")] * 2
+    assert (out[0].style, out[0].position, out[0].list_name) == ("slam", "top-left", "")
 
 
 def test_layout_hint_names_every_area():

@@ -17,10 +17,11 @@ from pydantic import BaseModel, Field
 from segmentation import Segment, Word
 
 # Roughly how many seconds of video per graphic, by density setting.
-DENSITY_SECONDS = {"low": 15, "medium": 9, "high": 5}
+DENSITY_SECONDS = {"low": 9, "medium": 5, "high": 3.5}
 
 STYLES = ("slam", "swipe", "reveal", "bullet")
 MAX_PER_SEGMENT = 4
+MAX_LIST = 4      # lines in one stacked list
 BULLET_POSITIONS = ("top-left", "bottom-left", "center")  # lists stack from the left
 POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "center")
 
@@ -31,12 +32,17 @@ POSITION_AREA = {
     "center": "centre",
 }
 
-MIN_SHOW = 1.8     # seconds a graphic stays up at minimum
-HOLD_AFTER = 1.2   # seconds it lingers after the anchor words are spoken
+# A graphic stays up until the next one needs its part of the frame, at most
+# HOLD_AFTER seconds past its words, so with the default density some text is on
+# screen nearly all the time. Two graphics may share the screen when one is in
+# the upper half and the other in the lower half (a headline over a list).
+MIN_SHOW = 3.0     # seconds a graphic stays up at minimum
+HOLD_AFTER = 6.0   # seconds it lingers after the anchor words are spoken, at most
 LEAD_IN = 0.15     # appear just before the words are spoken
-GAP = 0.2          # space between two consecutive graphics
-BULLET_HOLD = 2.0  # a finished list stays up this long after its last point
-BULLET_JOIN = 6.0  # bullets less than this many seconds apart form one list
+GAP = 0.2          # space between two consecutive graphics in the same area
+BULLET_HOLD = 6.0  # a finished list stays up this long after its last point, at most
+BULLET_JOIN = 6.0  # unnamed bullets less than this many seconds apart form one list
+LIST_JOIN = 20.0   # bullets of the same named list join across this much time
 DEFAULT_ACCENT = "#FFC400"
 
 
@@ -62,6 +68,11 @@ class Callout(BaseModel):
         "the area of the frame least likely to hold a face or the main action, based on "
         "the shot description. Use 'center' only for 'slam' or 'bullet' over a calm moment. "
         "'bullet' lists only use 'top-left', 'bottom-left' or 'center'."))
+    list_name: str = Field(default="", description=(
+        "When the narration enumerates items ('three things', 'four tiers', 'first... "
+        "second... third'), every item is a callout with the same list_name (e.g. 'key "
+        "factors'), the same style and the same position, even when the items fall in "
+        "different segments. Empty for a graphic that is not part of a list."))
 
 
 class CalloutPlan(BaseModel):
@@ -72,25 +83,33 @@ class CalloutPlan(BaseModel):
 
 
 INSTRUCTIONS = """\
-You are the motion-graphics editor of a slick, modern infomercial. Choose a few
+You are the motion-graphics editor of a slick, modern infomercial. Choose
 animated text graphics that visualise the most important keywords. They must
 feel designed into the film, not like subtitles.
 
 Rules:
-- Be selective. Most segments get no graphic. Aim for about one graphic moment
-  every {every} seconds of video (about {target} for this {total}s video), and
-  avoid graphics in two consecutive segments unless both are essential.
-- Usually one graphic per segment, but use more when it makes sense: when the
-  narration lists several points (features, steps, benefits), show each as a
-  'bullet' (2 to 4 bullets, each anchored on the words that name that point).
-  A whole list counts as one moment. Never more than {max_per} per segment.
+- Keep text on screen nearly all the time. Each graphic stays up until the next
+  one replaces it, so aim for about one graphic every {every} seconds of video
+  (about {target} for this {total}s video). Nearly every segment gets one; a
+  segment goes without only when nothing in it is worth remembering.
+- Use more than one in a segment when it makes sense: a headline ('3 KEY
+  FACTORS') and then the points, or when the narration lists several points
+  (features, steps, benefits), one 'bullet' per point (2 to {max_list}, each
+  anchored on the words that name that point). Never more than {max_per} per
+  segment.
+- Items of one list look alike. Give every item of an enumeration the same
+  list_name, the same style and the same position, even when the items are in
+  different segments. Items spoken within about 15 seconds of each other are
+  'bullet's that stack up; items further apart are 'swipe's numbered in the
+  text ('1. CONTENT-BASED', '2. CONTEXT-BASED').
 - Pick what a viewer should remember: product names, numbers, prices, offers,
   key benefits, the call to action. Never transcribe sentences.
 - Text is 1 to 4 words, at most 22 characters. Rephrase for impact; write
   numbers as digits.
 - The anchor must be copied exactly from that segment's narration.
 - Vary the placement and style across the video so it feels edited, and keep
-  graphics away from faces.
+  graphics away from faces. A headline in the upper half of the frame can stay
+  up while points appear in the lower half.
 """
 
 
@@ -112,7 +131,7 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
         contents=f"FILM LOOK: {visual_style}\n\nSEGMENTS:\n{seg_list}",
         config=types.GenerateContentConfig(
             system_instruction=INSTRUCTIONS.format(every=every, target=target, total=total,
-                                                   max_per=MAX_PER_SEGMENT),
+                                                   max_per=MAX_PER_SEGMENT, max_list=MAX_LIST),
             response_mime_type="application/json",
             response_schema=CalloutPlan,
         ),
@@ -121,25 +140,37 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
     plan = CalloutPlan.model_validate(plan.model_dump())
     accent = plan.accent_color if re.fullmatch(r"#?[0-9a-fA-F]{6}", plan.accent_color or "") \
         else DEFAULT_ACCENT
+    return "#" + accent.lstrip("#").upper(), enforce_rules(plan.callouts, {s.index for s in segments})
 
-    # Enforce the rules in code too: a per-segment cap, no duplicates, valid style/position.
+
+def enforce_rules(callouts: list[Callout], valid_idx: set[int]) -> list[Callout]:
+    """The planner's rules, applied in code too: a per-segment cap, no duplicates,
+    valid style and position, and every item of a named list in the look of its
+    first item."""
     per_seg: dict[int, int] = {}
     seen: set[tuple[int, str]] = set()
-    valid_idx = {s.index for s in segments}
+    first_of: dict[str, Callout] = {}
     out = []
-    for c in sorted(plan.callouts, key=lambda c: c.segment_index):  # stable: keeps spoken order
+    for c in sorted(callouts, key=lambda c: c.segment_index):  # stable: keeps spoken order
         key = (c.segment_index, c.text.strip().lower())
         if c.segment_index not in valid_idx or not c.text.strip() or key in seen \
                 or per_seg.get(c.segment_index, 0) >= MAX_PER_SEGMENT:
             continue
         seen.add(key)
         per_seg[c.segment_index] = per_seg.get(c.segment_index, 0) + 1
-        c.style = c.style if c.style in STYLES else "swipe"
-        c.position = c.position if c.position in POSITIONS else "bottom-left"
-        if c.style == "bullet" and c.position not in BULLET_POSITIONS:
-            c.position = c.position.replace("right", "left")
+        c.list_name = (c.list_name or "").strip().lower()
+        if c.list_name in first_of:
+            lead = first_of[c.list_name]
+            c.style, c.position = lead.style, lead.position
+        else:
+            c.style = c.style if c.style in STYLES else "swipe"
+            c.position = c.position if c.position in POSITIONS else "bottom-left"
+            if c.style == "bullet" and c.position not in BULLET_POSITIONS:
+                c.position = c.position.replace("right", "left")
+            if c.list_name:
+                first_of[c.list_name] = c
         out.append(c)
-    return "#" + accent.lstrip("#").upper(), out
+    return out
 
 
 def layout_hint(callouts: list[Callout]) -> str:
@@ -164,9 +195,20 @@ class TimedCallout:
     end: float
     row: int = 0    # bullet lists: this item's line, and how many lines the list has
     rows: int = 1
+    list_name: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _band(position: str) -> str:
+    return position.partition("-")[0]   # top, bottom or center
+
+
+def _conflicts(a: list[TimedCallout], b: list[TimedCallout]) -> bool:
+    """Two groups can't share the screen: same half of the frame, or one in the centre."""
+    return _band(a[0].position) == _band(b[0].position) \
+        or "center" in (a[0].position, b[0].position)
 
 
 def _norm(token: str) -> str:
@@ -199,18 +241,30 @@ def time_callouts(callouts: list[Callout], words: list[Word], segments: list[Seg
             span = (seg.start + 0.3, seg.start + 0.3)  # anchor not found: early in the clip
         start = max(0.0, span[0] - LEAD_IN)
         end = max(start + MIN_SHOW, span[1] + HOLD_AFTER)
-        timed.append(TimedCallout(c.text.strip(), c.style, c.position, start, end))
+        timed.append(TimedCallout(c.text.strip(), c.style, c.position, start, end,
+                                  list_name=c.list_name))
     timed.sort(key=lambda t: t.start)
 
-    # Consecutive bullets become one list: each line appears when spoken, and the
-    # whole list stays up together until a while after the last point.
+    # Bullets become one list: each line appears when spoken, and the whole list
+    # stays up together until a while after the last point. Bullets of one named
+    # list join across segments, even with other graphics in between; unnamed
+    # consecutive bullets join when spoken close together.
     groups: list[list[TimedCallout]] = []
     for t in timed:
-        prev = groups[-1][-1] if groups else None
-        if (prev and t.style == prev.style == "bullet" and t.start - prev.start <= BULLET_JOIN
-                and len(groups[-1]) < MAX_PER_SEGMENT):
-            t.position = groups[-1][0].position
-            groups[-1].append(t)
+        g = None
+        if t.style == "bullet" and t.list_name:
+            g = next((g for g in reversed(groups) if g[0].list_name == t.list_name
+                      and g[0].style == "bullet"), None)
+            if g and (len(g) >= MAX_LIST or t.start - g[-1].start > LIST_JOIN):
+                g = None
+        elif t.style == "bullet" and groups:
+            g = groups[-1]
+            if (g[-1].style != "bullet" or g[-1].list_name or len(g) >= MAX_LIST
+                    or t.start - g[-1].start > BULLET_JOIN):
+                g = None
+        if g:
+            t.position = g[0].position
+            g.append(t)
         else:
             groups.append([t])
     for g in groups:
@@ -219,11 +273,13 @@ def time_callouts(callouts: list[Callout], words: list[Word], segments: list[Seg
             for row, t in enumerate(g):
                 t.row, t.rows, t.end = row, len(g), end
 
-    # A group ends before the next group starts.
-    for cur, nxt in zip(groups, groups[1:]):
-        limit = nxt[0].start - GAP
-        for t in cur:
-            t.end = min(t.end, limit)
+    # A group stays up until the next group that needs its half of the frame. As
+    # there are only two halves, at most two groups are ever up at once.
+    for i, cur in enumerate(groups):
+        nxt = next((g for g in groups[i + 1:] if _conflicts(cur, g)), None)
+        if nxt:
+            for t in cur:
+                t.end = min(t.end, nxt[0].start - GAP)
     out = []
     for g in groups:
         for t in g:

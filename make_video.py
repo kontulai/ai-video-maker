@@ -1035,8 +1035,9 @@ def confirm_prompts(items: list[dict], run: Path) -> list[dict]:
         data = json.loads(callouts_path.read_text())
         print(f"Keyword graphics (accent {data.get('accent_color')}):")
         for c in data.get("callouts", []):
-            print(f"  clip {c['segment_index']}: \"{c['text']}\"  [{c['style']}, {c['position']}]"
-                  f"  on \"{c['anchor']}\"")
+            group = f", list '{c['list_name']}'" if c.get("list_name") else ""
+            print(f"  clip {c['segment_index']}: \"{c['text']}\"  [{c['style']}, {c['position']}"
+                  f"{group}]  on \"{c['anchor']}\"")
         if not data.get("callouts"):
             print("  (none)")
         print(f"Edit {callouts_path} to change them (any time before the final step).")

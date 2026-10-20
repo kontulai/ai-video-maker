@@ -41,7 +41,7 @@ Useful options:
 | `--resolution R` | `360p`, `720p` (default), `1080p` or `4k`. |
 | `--no-lip-sync` | Don't put the spoken line in the prompt. Use for pure voice-over. |
 | `--resume runs/<id>` | Continue a run; finished steps and clips are skipped. |
-| `--callouts off\|low\|medium\|high` | How often keyword graphics pop up. Default `medium`, about one every 9 seconds. |
+| `--callouts off\|low\|medium\|high` | How often keyword graphics pop up. Default `medium`, about one every 5 seconds, so some text is on screen most of the time. |
 | `--text-retries N` | Retake a clip up to N times when Gemini spots lettering in it. Default `2`; `0` turns the check off. Each retake costs a video generation. |
 | `--no-fit` | Don't rewrite each prompt to match what the previous clip actually ends on (see below). |
 | `-y` | Skip the confirmation before generating video. |
@@ -61,14 +61,16 @@ The video model's own generated audio is discarded. The ElevenLabs narration is 
 
 ## Keyword graphics
 
-Gemini picks a few keywords worth showing, such as prices, numbers, product names or the call to action. Most clips get none. A clip can get several when it makes sense, for example a list of points shown as bullets. Each graphic appears exactly when its words are spoken, using the ElevenLabs word timings.
+Gemini picks the keywords worth showing, such as prices, numbers, product names or the call to action. Nearly every clip gets one, and a clip can get several when it makes sense: a headline and then the points under it, or a list of points shown as bullets. Each graphic appears exactly when its words are spoken, using the ElevenLabs word timings, and stays up until the next graphic needs its half of the frame, for up to six seconds after its words. A headline in the upper half can stay up while the points appear in the lower half. At the default density some text is on screen most of the time.
 
 They are animated motion graphics, not subtitles. They sit in a corner or the centre, away from faces, in one accent colour taken from the film's palette. Gemini chooses one of four looks for each:
 
 - **slam**: huge tilted text that crashes in. For prices, numbers and offers.
 - **swipe**: a label on a colour bar that wipes in, like a TV lower-third. For product names and features.
 - **reveal**: letters type on and an accent line grows under them. For a key benefit.
-- **bullet**: one point of a list. Each point pops in with an accent marker as it is spoken, and the list stays up together until shortly after the last point.
+- **bullet**: one point of a list. Each point pops in with an accent marker as it is spoken, and the list stays up together until a while after the last point.
+
+Items of one enumeration ("three key factors", "four tiers", "first... second... third") look alike. Gemini gives them one `list_name`, and every item is rendered in the style and position of the first, even when the items fall in different clips. Items spoken within about 15 seconds of each other are bullets that stack into one list across clips; items further apart are numbered swipes that replace each other in the same spot.
 
 The video prompt for a clip with a graphic asks for a calm, empty area where the graphic will sit. The choices are saved in `callouts.json` in the run folder. Edit or delete entries there before the final step; the file is read again when the video is assembled. Set `CALLOUT_FONT` and `CALLOUT_FONT_HEAVY` in `.env` to change the fonts. Use exact face names such as `Avenir Next Bold`, because asking for plain `Avenir Next` in bold picks the italic face on macOS.
 
