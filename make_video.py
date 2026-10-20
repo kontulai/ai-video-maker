@@ -540,9 +540,12 @@ def video_request(item: dict, aspect: str, resolution: str, previous_id: str | N
            "duration": f"{item['duration']}s", "delivery": "uri"}
     body = {"model": VIDEO_MODEL, "response_format": fmt, "background": True}
     if previous_id:
+        # The previous interaction is what makes this an extension; Omni rejects a
+        # video task alongside it ("previous_interaction_id is not allowed when
+        # video task is set").
         body.update(previous_interaction_id=previous_id, input=item["prompt"])
-        task = "extend"
-    elif first_frame is not None:
+        return body
+    if first_frame is not None:
         mime = "image/png" if first_frame.suffix.lower() == ".png" else "image/jpeg"
         image = {"type": "image", "mime_type": mime,
                  "data": base64.b64encode(first_frame.read_bytes()).decode()}

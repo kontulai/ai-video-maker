@@ -234,7 +234,7 @@ def test_video_requests(tmp_path):
     ext = mv.video_request(item, "16:9", "720p", "int-1", None)
     assert ext["previous_interaction_id"] == "int-1" and ext["input"] == item["prompt"]
     assert ext["response_format"]["duration"] == "7s"
-    assert ext["generation_config"]["video_config"]["task"] == "extend"
+    assert "generation_config" not in ext  # Omni rejects a task with previous_interaction_id
     fresh = mv.video_request(item, "16:9", "720p", None, frame)
     assert "previous_interaction_id" not in fresh
     assert fresh["generation_config"]["video_config"]["task"] == "image_to_video"

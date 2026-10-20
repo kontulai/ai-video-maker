@@ -18,6 +18,8 @@ class FakeInteractions:
         self._tmp = Path(tempfile.mkdtemp())
 
     def create(self, **body):
+        if body.get("previous_interaction_id") and "generation_config" in body:
+            raise ValueError("previous_interaction_id is not allowed when video task is set.")
         self.bodies.append(body)
         new = int(re.fullmatch(r"(\d+)s", body["response_format"]["duration"]).group(1))
         prev = body.get("previous_interaction_id")
@@ -39,4 +41,6 @@ class FakeInteractions:
         return self._done
 
     def task(self, i: int) -> str:
+        if "previous_interaction_id" in self.bodies[i]:
+            return "extend"
         return self.bodies[i]["generation_config"]["video_config"]["task"]
