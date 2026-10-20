@@ -231,6 +231,73 @@ def test_frame_is_still_reviewed_with_the_text_check_off(tmp_path, monkeypatch):
     assert len(client.prompts) == 2 and IN_FRAME in client.prompts[1]
 
 
+class _BlockingInteractions(FakeInteractions):
+    """Omni whose input filter refuses the first `blocks` requests."""
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks, self.refused = blocks, 0
+
+    def create(self, **body):
+        if self.refused < self.blocks:
+            self.refused += 1
+            raise RuntimeError("Error code: 400 - {'error': {'message': 'Input blocked: The prompt "
+                               "could not be processed.', 'code': 'content_blocked'}}")
+        return super().create(**body)
+
+
+FULL = ("Single shot.\nFIX: the last take showed lettering.\nCAMERA: wide\nACTION: types\n"
+        "DIALOGUE: none\n" + mv.NO_TEXT_LINE + "\nSTYLE: photoreal\nSETTING: office\n"
+        "CHARACTERS (identical in every clip):\n- Maya: 30s Wearing: cardigan\n"
+        "Compose the shot so the lower-right third is calm.\nAVOID: text.")
+LEAN = "Single shot.\nCAMERA: wide\nACTION: types\nDIALOGUE: none\n" + mv.NO_TEXT_LINE + "\nAVOID: text."
+
+
+def _blocking(tmp_path, monkeypatch, blocks, items, **kw):
+    client = _OmniClient(texty_takes=0)
+    client.interactions = _BlockingInteractions(blocks)
+    waits = []
+    monkeypatch.setattr(mv.time, "sleep", waits.append)
+    _clips(tmp_path, monkeypatch, client, items=items, **kw)
+    return client, waits
+
+
+def test_lean_prompt_keeps_only_the_shot():
+    assert mv.lean_prompt(FULL) == LEAN
+    with_frame = mv.lean_prompt("Extend.\nIN FRAME NOW: Maya frame-left\nACTION: x\nSETTING: o")
+    assert with_frame == "Extend.\nIN FRAME NOW: Maya frame-left\nACTION: x"
+
+
+def test_refused_input_is_resent_after_a_wait_then_leaner(tmp_path, monkeypatch):
+    item = {"index": 1, "duration": 4, "scene": 1, "step": 0, "prompt": FULL, "bible": "STYLE: photoreal"}
+    client, waits = _blocking(tmp_path, monkeypatch, blocks=2, items=[item])
+    # Attempt 2 repeats the request unchanged after a long wait; attempt 3 drops the extras.
+    assert client.interactions.refused == 2 and client.prompts == [LEAN]
+    assert waits[0] == mv.BLOCK_WAIT_SECONDS
+    assert (tmp_path / "clips" / "clip_01.mp4").exists()
+
+
+def test_refused_retake_keeps_the_clip_and_the_run_goes_on(tmp_path, monkeypatch):
+    client = _OmniClient(texty_takes=99)  # every take "shows text" so a retake is wanted
+
+    class _RefuseRetakes(FakeInteractions):
+        def create(self, **body):
+            if self.bodies:  # everything after the first take is refused, leaner or not
+                raise RuntimeError("code: content_blocked")
+            return super().create(**body)
+    client.interactions = _RefuseRetakes()
+    monkeypatch.setattr(mv.time, "sleep", lambda s: None)
+    _clips(tmp_path, monkeypatch, client, items=ITEMS[:1], text_retries=1)  # no SystemExit
+    # The clip from the first (texty) take is kept.
+    assert len(client.prompts) == 1 and _saved_interaction(tmp_path, 1) == "int-1"
+    assert abs(mv.media_duration(tmp_path / "clips" / "clip_01.mp4") - 4) < 0.1
+
+
+def test_refused_first_take_still_stops_the_run(tmp_path, monkeypatch):
+    import pytest
+    with pytest.raises(SystemExit):
+        _blocking(tmp_path, monkeypatch, blocks=99, items=ITEMS[:1])
+
+
 def test_old_plans_never_extend_past_the_omni_limit(tmp_path, monkeypatch):
     # A 40 s scene planned by an older version: the last step must become a new take.
     items = [{"index": i + 1, "duration": d, "scene": 1, "step": i,

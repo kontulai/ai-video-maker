@@ -565,6 +565,25 @@ def plan_callouts(items: list[dict], segments: list[Segment], run: Path,
 # ---------------------------------------------------------------------------
 
 POLL_SECONDS = 10
+# Omni's input filter is not deterministic: the same request has been refused three
+# times in a minute and accepted unchanged later. So a refused request waits, and is
+# then sent again in a leaner form rather than verbatim.
+BLOCK_WAIT_SECONDS = 30
+
+
+def is_content_block(error: Exception) -> bool:
+    text = str(error)
+    return "content_blocked" in text or "Input blocked" in text
+
+
+def lean_prompt(prompt: str) -> str:
+    """The prompt reduced to the take header, what is in frame and the shot itself:
+    no bible, fix notes or layout hints. Used when the full prompt keeps being refused."""
+    keep = ("CAMERA", "ACTION", "EXPRESSION", "CONTINUITY", "DIALOGUE", "TEXT", "AVOID")
+    first, *rest = prompt.splitlines()
+    lines = [first] + [ln for ln in rest
+                       if ln.startswith(IN_FRAME_PREFIX) or ln.partition(": ")[0] in keep]
+    return "\n".join(lines)
 
 
 def extract_last_frame(video: Path, out: Path) -> Path:
@@ -846,7 +865,9 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         return extract_last_frame(paths[i - 1], clip_dir / f"lastframe_{i:02d}.png")
 
     def render(i: int, item: dict, previous_id: str | None, scene_len: float,
-               frame: Path | None) -> None:
+               frame: Path | None, required: bool = True) -> bool:
+        """Generate one clip, retrying on failure. A required clip stops the run when
+        every attempt fails; an optional one (a retake) just reports False."""
         n, raw = item["index"], paths[i].with_suffix(".raw.mp4")
         for attempt in range(1, retries + 1):
             kind = "extending the scene" if previous_id else "new take"
@@ -864,16 +885,26 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                 state[str(n)] = {"interaction": it.id, "scene_len": length}
                 state_path.write_text(json.dumps(state, indent=2))
                 log(f"Clip {n} saved.")
-                return
+                return True
             except Exception as e:  # noqa: BLE001 - surface any API failure and retry
                 log(f"Clip {n} failed: {e}")
+                if is_content_block(e):
+                    if attempt == 1:
+                        log(f"Omni's content filter refused the input; it is not consistent, "
+                            f"so waiting {BLOCK_WAIT_SECONDS}s and trying the same request again.")
+                        time.sleep(BLOCK_WAIT_SECONDS)
+                    elif lean_prompt(item["prompt"]) != item["prompt"]:
+                        log("Refused again; sending only the shot, without the bible and notes.")
+                        item = {**item, "prompt": lean_prompt(item["prompt"]), "bible": ""}
                 if attempt == retries - 1 and previous_id:
                     log("Last attempt: starting a new take from the previous clip's last frame "
                         "instead of extending.")
                     previous_id, frame = None, last_frame(i)
                 time.sleep(5 * attempt)
-        sys.exit(f"Clip {n} failed {retries} times. "
-                 f"Fix the prompt in {run / 'prompts.json'} and rerun with --resume {run}")
+        if required:
+            sys.exit(f"Clip {n} failed {retries} times. "
+                     f"Fix the prompt in {run / 'prompts.json'} and rerun with --resume {run}")
+        return False
 
     def review(i: int, previous_id: str | None, scene_len: float, frame: Path | None) -> None:
         """Watch the clip: retake the step while Gemini sees too much lettering (Omni
@@ -891,8 +922,11 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                     f"keeping it. Delete {paths[i]} and rerun with --resume {run} to try again.")
                 break
             log(f"Clip {n} shows too much text ({where}); retaking ({take + 1}/{text_retries})...")
-            render(i, {**items[i], "prompt": with_text_fix(items[i]["prompt"], where)},
-                   previous_id, scene_len, frame)
+            if not render(i, {**items[i], "prompt": with_text_fix(items[i]["prompt"], where)},
+                          previous_id, scene_len, frame, required=False):
+                log(f"Warning: the retake of clip {n} failed; keeping the clip with its text. "
+                    f"Delete {paths[i]} and rerun with --resume {run} to try again.")
+                break
         if result is not None and result.in_frame.strip():
             state[str(n)]["in_frame"] = result.in_frame.strip()
             state_path.write_text(json.dumps(state, indent=2))
