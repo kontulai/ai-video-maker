@@ -170,3 +170,15 @@ def test_text_check_can_be_turned_off(tmp_path, monkeypatch):
     client = _OmniClient(texty_takes=99)
     _clips(tmp_path, monkeypatch, client, text_retries=0)
     assert len(client.prompts) == 1
+
+
+def test_old_plans_never_extend_past_the_omni_limit(tmp_path, monkeypatch):
+    # A 40 s scene planned by an older version: the last step must become a new take.
+    items = [{"index": i + 1, "duration": d, "scene": 1, "step": i,
+              "prompt": f"Extend this video by {d} seconds as the same continuous shot; no cut.\nACTION: x"}
+             for i, d in enumerate([10, 10, 10, 9])]
+    client = _OmniClient(texty_takes=0)
+    _clips(tmp_path, monkeypatch, client, items=items)
+    tasks = [client.interactions.task(i) for i in range(4)]
+    assert tasks == ["text_to_video", "extend", "extend", "image_to_video"]
+    assert client.prompts[3].startswith("Single continuous 9-second shot")

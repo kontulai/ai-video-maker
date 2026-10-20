@@ -6,7 +6,7 @@ Pipeline
   2. Ask for the talk track (the words to be spoken).
   3. Generate the voice track with ElevenLabs (with word timings).
   4. Split the talk track into 3-10 s segments grouped into scenes of up to
-     40 s, and have Gemini write a continuity-preserving prompt for each one.
+     30 s, and have Gemini write a continuity-preserving prompt for each one.
   5. Generate each scene with Gemini Omni 1.1 Flash: the first segment is a
      new take and every later segment extends that same video.
   6. Concatenate the segments.
@@ -746,9 +746,14 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         prev = state.get(str(items[i - 1]["index"]), {}) if i else {}
         previous_id = prev.get("interaction") if item.get("step", 0) > 0 else None
         scene_len = prev.get("scene_len", 0.0) if previous_id else 0.0
+        if previous_id and scene_len + item["duration"] > MAX_SCENE_SECONDS + 0.5:
+            # Omni rejects extending past this length (plans from older versions allowed 40 s).
+            log(f"Clip {item['index']} would make the scene {scene_len + item['duration']:.0f}s, "
+                f"over Omni's {MAX_SCENE_SECONDS}s; starting a new take from the last frame.")
+            previous_id, scene_len = None, 0.0
         frame = None
         if not previous_id:
-            if item.get("step", 0) > 0:
+            if item.get("step", 0) > 0 and str(items[i - 1]["index"]) not in state:
                 log(f"No saved interaction to extend for clip {item['index']}; "
                     "starting a new take from the previous clip's last frame.")
             frame = last_frame(i)
@@ -895,8 +900,13 @@ def main() -> None:
     # 4: segments + prompts
     if not 10 <= args.max_scene <= MAX_SCENE_SECONDS:
         sys.exit(f"--max-scene must be between 10 and {MAX_SCENE_SECONDS}.")
-    segments = plan_segments(words_from_alignment(alignment), duration, args.max_scene)
-    (run / "segments.json").write_text(json.dumps([s.to_dict() for s in segments], indent=2))
+    seg_path = run / "segments.json"
+    if (run / "prompts.json").exists() and seg_path.exists():
+        # Resuming: keep the plan the prompts were written for.
+        segments = [Segment(**d) for d in json.loads(seg_path.read_text())]
+    else:
+        segments = plan_segments(words_from_alignment(alignment), duration, args.max_scene)
+    seg_path.write_text(json.dumps([s.to_dict() for s in segments], indent=2))
     log(f"{segments[-1].scene} scene(s), {segments[-1].end}s for {duration:.1f}s of audio. "
         "Each scene is one video: a new take, then extended step by step.")
     for n in range(1, segments[-1].scene + 1):

@@ -91,13 +91,13 @@ def _sentences(n: int, every: int = 8) -> list[Word]:
 
 
 def test_long_talk_tracks_are_split_into_scenes():
-    words = _sentences(12)   # 96 s, sentence ends at 8, 16, 24, ...
-    segs = plan_segments(words, words[-1].end + 0.2, max_scene=40)
+    words = _sentences(12)   # 96 s, sentence ends at 8, 16, 24, ... -> 4 scenes of 24 s
+    segs = plan_segments(words, words[-1].end + 0.2, max_scene=30)
     scenes = sorted({s.scene for s in segs})
-    assert len(scenes) == 3 and scenes == [1, 2, 3]
+    assert scenes == [1, 2, 3, 4]
     for n in scenes:
         part = [s for s in segs if s.scene == n]
-        assert sum(s.duration for s in part) <= 40
+        assert sum(s.duration for s in part) <= 30
         assert [s.step for s in part] == list(range(len(part)))
     # A new take starts between sentences, not mid-sentence.
     for a, b in zip(segs, segs[1:]):

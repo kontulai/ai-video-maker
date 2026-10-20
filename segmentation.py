@@ -8,7 +8,7 @@ so cuts are at whole seconds. We pick the segment lengths with dynamic
 programming so the cuts land in pauses between words (ideally at the end of a
 sentence) instead of in the middle of a word.
 
-Segments are then grouped into scenes. Omni extends one video to at most 40
+Segments are then grouped into scenes. Omni extends one video to at most 30
 seconds, so a longer talk track needs several scenes; each new scene starts
 from the last frame of the previous one.
 """
@@ -19,7 +19,9 @@ import math
 from dataclasses import dataclass, asdict
 
 DURATIONS = tuple(range(3, 11))   # Omni: 3-10 s per generation or extension
-MAX_SCENE_SECONDS = 40           # Omni extends a video to at most 40 s
+# Google's docs say 40 s, but extending past 30 s is rejected in practice (400
+# "There was a problem processing your request"), matching Runware's 30 s.
+MAX_SCENE_SECONDS = 30
 
 # Cost tuning. Lower total cost wins.
 COST_CUT_INSIDE_WORD = 10.0

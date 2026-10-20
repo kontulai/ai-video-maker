@@ -16,7 +16,7 @@ from fake_omni import FakeInteractions
 from test_pipeline import SCRIPT, fake_alignment
 
 
-@pytest.mark.parametrize("whole_scene,max_scene", [(False, 40), (True, 40), (False, 10)])
+@pytest.mark.parametrize("whole_scene,max_scene", [(False, 30), (True, 30), (False, 10)])
 def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GEMINI_API_KEY", "x")
@@ -91,7 +91,7 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
         else:
             assert omni.task(i) == "image_to_video" and "previous_interaction_id" not in omni.bodies[i]
     scenes = {p["scene"] for p in prompts}
-    if max_scene == 40:
+    if max_scene == 30:
         assert scenes == {1} and len(prompts) > 1
     else:
         assert len(scenes) == len(prompts) > 1
