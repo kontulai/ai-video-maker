@@ -52,17 +52,12 @@ CALLOUT_FONT_HEAVY = os.getenv("CALLOUT_FONT_HEAVY", "Avenir Next Heavy")
 
 # Omni has no negative-prompt parameter, so this goes into every prompt as an AVOID line.
 NEGATIVE_PROMPT = (
-    "subtitles, captions, on-screen text, readable text, words, letters, typography, "
-    "misspelled or garbled text, text on computer screens, signs with writing, "
-    "watermark, logo, scene cut, jump cut, fingers touching a desktop monitor, "
-    "change of character appearance, change of wardrobe, change of hairstyle, "
-    "change of location, extra people, distorted faces, deformed hands, "
-    # Typical AI-video artefacts: things that pop into existence or change by themselves.
-    "objects suddenly appearing or vanishing, props materialising out of nowhere, "
-    "objects morphing into other objects, duplicated or multiplying objects, "
-    "items floating, melting or warping, furniture shifting position, "
-    "extra fingers or limbs, faces morphing, flickering or crawling textures, "
-    "nonsensical background clutter, impossible physics, glossy plastic AI look, low quality"
+    # Kept short: a long list dilutes the model's attention and the tail is ignored.
+    "readable text, captions, subtitles, garbled lettering, watermark, scene cut, "
+    "objects suddenly appearing or vanishing, props morphing or multiplying, "
+    "floating icons or graphics outside screens, furniture shifting position, "
+    "extra people entering frame, extra fingers or limbs, distorted faces or hands, "
+    "change of face, hair, wardrobe or location, glossy plastic AI look"
 )
 # Keep prompts compact: video models weigh the start most and may ignore a long tail.
 MAX_PROMPT_CHARS = 3600
@@ -179,8 +174,13 @@ class Bible(BaseModel):
         "Film look in at most 30 words: medium (e.g. photoreal cinematic), lens/film feel, "
         "colour grade, depth of field."))
     setting: str = Field(description=(
-        "The location in at most 60 words: architecture, key furniture and props with "
-        "their positions, background, time of day."))
+        "The location in at most 60 words: architecture, key furniture and props, "
+        "background, time of day."))
+    layout: str = Field(description=(
+        "Where everything sits as the camera sees it, at most 60 words. Use only the "
+        "words frame-left, frame-right, centre, foreground and background (never a bare "
+        "'left' or 'right'). For each person: their position, which way they face and on "
+        "which side of them their monitor or screen stands."))
     lighting: str = Field(description=(
         "Light sources, direction, quality and colour temperature, at most 25 words."))
     characters: list[Character]
@@ -188,7 +188,9 @@ class Bible(BaseModel):
 
 class Shot(BaseModel):
     index: int
-    camera: str = Field(description="Shot size, angle and camera movement, at most 20 words.")
+    camera: str = Field(description=(
+        "Shot size, angle and camera movement, at most 20 words. Inside a scene: locked "
+        "off or a very slow drift within the framing already established."))
     action: str = Field(description=(
         "What happens on screen, matched to what is said, at most 45 words."))
     expression: str = Field(description="Facial expression and body language, at most 15 words.")
@@ -214,27 +216,57 @@ is ONE unbroken take: its first segment is generated fresh and every later
 segment extends that same video by 3 to 10 seconds. A new scene starts from the
 exact last frame of the previous scene. The narration is laid over the top.
 
-Consistency comes from the extensions and from the prompts. Produce a production bible (visual style, setting, lighting, characters) that
+Consistency comes from the extensions and from the prompts. Produce a
+production bible (visual style, setting, layout, lighting, characters) that
 is specific and concrete: exact colours, materials, positions, ages,
 hairstyles, clothing details. Never use vague words like "stylish" or "modern"
-without saying exactly what they look like. The bible is repeated word for
-word in every prompt, and the model only reads about 900 words in total, so
-respect the word limit on every field. Write dense noun phrases, not full
-sentences; no filler, no repetition between fields.
+without saying exactly what they look like. The bible goes word for word into
+the first prompt of every scene, and the model only reads about 900 words in
+total, so respect the word limit on every field. Write dense noun phrases, not
+full sentences; no filler, no repetition between fields.
+
+LAYOUT. Positions are always given as the camera sees them, using only the
+words frame-left, frame-right, centre, foreground and background. A bare
+"left" or "right" is ambiguous (the character's left? the viewer's?) and puts
+screens on the wrong side, so never use it. Say which way each person faces
+and on which side of them their monitor stands, e.g. "Maya frame-left in
+profile facing frame-right, her monitor frame-right of her". Use exactly the
+same terms in every camera, action and continuity field.
 
 Then write exactly one shot per segment, in order, with the same index. Match
 the visuals to what is being said in that segment and to its duration. Keep
 the same characters, wardrobe and location in every shot unless the brief
 explicitly asks otherwise. Each shot continues exactly where the previous one
-ended (same framing, positions and props) with smooth, motivated camera
-movement; never plan a cut or a jump to a new angle or location. Describe only
-what can happen in that many seconds of the same take.
+ended (same framing, positions and props); never plan a cut or a jump to a new
+angle or location. Describe only what can happen in that many seconds of the
+same take.
+
+CAMERA. A scene's first shot sets the framing. Every later shot in that scene
+keeps it: the camera is locked off or drifts very slowly (a gentle push-in or
+small reframe) and never pans, tilts, dollies or zooms out to reveal areas or
+people that were not visible in the scene's first shot. All action happens
+within what is already in frame.
+
+SCENE STARTS. A new scene is generated from a still of the previous scene's
+final frame, so its first shot must hold that framing, people and screen
+content and must not pan or move to another desk or person: the model cannot
+see what is outside the still and invents it. If the story moves to another
+character or desk, the previous scene's last shot is the one place a slow
+reframe may bring them into frame, ending with them clearly visible, so that
+the next scene opens on them. Plan the end of each scene around what the next
+scene opens on.
+
+PEOPLE. Only characters visible in a scene's first shot appear in that scene.
+Nobody walks in, leans in or appears in the background later; the model
+invents a new person when asked for one who is not in frame.
 
 NO AI SLOP. Nothing appears, disappears or changes by itself. Every object in
 frame is in the bible's setting or is visibly brought in by a character (picked
 up, carried in, handed over). Do not add new props, people or decorations in
 later shots, and do not ask for transformations, magic effects or things
-materialising. Keep backgrounds simple and physically plausible.
+materialising. Icons, charts, dialogs and windows exist only on screens: always
+say "on the monitor" or "on her screen", never let a graphic float in the air or
+lie on the desk. Keep backgrounds simple and physically plausible.
 
 NO READABLE TEXT. The video model cannot spell: any words, titles, labels, file names,
 numbers or messages you ask for come out garbled. So never quote text and never
@@ -255,6 +287,7 @@ def bible_text(bible: Bible) -> str:
     chars = "\n".join(f"- {c.name}: {c.appearance} Wearing: {c.wardrobe}" for c in bible.characters)
     return (f"STYLE: {bible.visual_style}\n"
             f"SETTING: {bible.setting}\n"
+            f"LAYOUT (as the camera sees it): {bible.layout}\n"
             f"LIGHTING: {bible.lighting}\n"
             f"CHARACTERS (identical in every clip):\n{chars}")
 
@@ -347,6 +380,7 @@ def clean_bible(bible: Bible) -> Bible:
     return bible.model_copy(update={
         "visual_style": strip_screen_text(bible.visual_style),
         "setting": strip_screen_text(bible.setting),
+        "layout": strip_screen_text(bible.layout),
         "lighting": strip_screen_text(bible.lighting),
         "characters": chars})
 
@@ -354,27 +388,35 @@ def clean_bible(bible: Bible) -> Bible:
 def take_header(duration: int, step: int, from_frame: bool = False) -> str:
     if step > 0:
         return (f"Extend this video by {duration} seconds as the same continuous shot; no cut. "
-                "Everyone and everything already in frame stays exactly as it is.")
-    start = " It starts exactly on the given first frame." if from_frame else ""
+                "Everyone and everything already in frame stays exactly as it is; "
+                "nothing and nobody else enters.")
+    start = (" It starts exactly on the given first frame and holds that framing; the people "
+             "in it keep exactly the same face, hair and clothes." if from_frame else "")
     return f"Single continuous {duration}-second shot from one film; no scene cuts.{start}"
 
 
-def build_clip_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
-    if shot.speaker_on_screen and lip_sync and seg.text:
-        dialogue = f'{shot.speaker_name or "The character"} says to camera: "{seg.text}"'
+def shot_lines(shot: Shot, text: str, lip_sync: bool) -> str:
+    if shot.speaker_on_screen and lip_sync and text:
+        dialogue = f'{shot.speaker_name or "The character"} says to camera: "{text}"'
     else:
         dialogue = "Voice-over only; nobody on screen talks."
-    # Video models weigh the start of a prompt most, so the shot comes first and the
-    # shared bible follows.
-    return (f"{take_header(seg.duration, seg.step, from_frame=seg.scene > 1)}\n"
-            f"CAMERA: {shot.camera}\n"
+    return (f"CAMERA: {shot.camera}\n"
             f"ACTION: {shot.action}\n"
             f"EXPRESSION: {shot.expression}\n"
             f"CONTINUITY: {shot.continuity}\n"
             f"DIALOGUE: {dialogue}\n"
-            f"{NO_TEXT_LINE}\n"
-            f"AVOID: {NEGATIVE_PROMPT}.\n"
-            f"{bible_text(bible)}")
+            f"{NO_TEXT_LINE}")
+
+
+def build_clip_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
+    # Video models weigh the start of a prompt most, so the shot comes first. Only a
+    # scene's first take gets the bible: an extension continues footage that already
+    # shows the people and the room, and re-listing every prop and person invites the
+    # model to add the ones that are not in frame.
+    body = f"{take_header(seg.duration, seg.step, from_frame=seg.scene > 1)}\n{shot_lines(shot, seg.text, lip_sync)}"
+    if seg.step == 0:
+        body += f"\n{bible_text(bible)}"
+    return f"{body}\nAVOID: {NEGATIVE_PROMPT}."
 
 
 def condense_bible(client, bible: Bible, max_chars: int) -> Bible:
@@ -414,8 +456,9 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
         longest = max(len(p) for p in prompts)
         if longest <= max_chars or attempt == attempts:
             break
-        # Room left for the bible in the longest prompt, with a little slack.
-        room = max_chars - (longest - len(bible_text(bible))) - 100
+        # Room left for the bible in the longest prompt that carries it, with a little slack.
+        longest_take = max(len(p) for p, (seg, _) in zip(prompts, pairs) if seg.step == 0)
+        room = max_chars - (longest_take - len(bible_text(bible))) - 100
         if room < 400:
             log("Warning: shot descriptions alone are close to the prompt limit; "
                 "consider shorter segments of narration.")
@@ -426,7 +469,9 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
         if len(p) > max_chars:
             log(f"Warning: prompt {i} is {len(p)} chars (limit ~{max_chars}); "
                 "the model may ignore the end. Edit prompts.json to shorten it.")
-    return [{**seg.to_dict(), "prompt": p} for (seg, _), p in zip(pairs, prompts)]
+    # The bible rides along so an extension that has to become a new take can get it back.
+    return [{**seg.to_dict(), "prompt": p, "bible": bible_text(bible)}
+            for (seg, _), p in zip(pairs, prompts)]
 
 
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
@@ -508,7 +553,7 @@ def plan_callouts(items: list[dict], segments: list[Segment], run: Path,
     for it in items:
         cs = by_seg.get(it["index"])
         if cs and "uncluttered background" not in it["prompt"]:
-            it["prompt"] = f"{it['prompt']}\n\n{fx.layout_hint(cs)}"
+            it["prompt"] = before_avoid(it["prompt"], fx.layout_hint(cs))
             changed = True
     if changed:
         (run / "prompts.json").write_text(json.dumps(items, indent=2, ensure_ascii=False))
@@ -527,9 +572,18 @@ def extract_last_frame(video: Path, out: Path) -> Path:
     return out
 
 
-def as_fresh_take(prompt: str, duration: int) -> str:
-    """Turn an extension prompt into one for a new take that starts on a given frame."""
+def before_avoid(prompt: str, text: str) -> str:
+    """Add text to a prompt, keeping the AVOID list as its last line."""
+    body, sep, avoid = prompt.rpartition("\nAVOID: ")
+    return f"{body}\n{text}{sep}{avoid}" if sep else f"{prompt}\n{text}"
+
+
+def as_fresh_take(prompt: str, duration: int, bible: str = "") -> str:
+    """Turn an extension prompt into one for a new take that starts on a given frame.
+    Extension prompts carry no bible, so it goes back in before the AVOID line."""
     _, _, rest = prompt.partition("\n")
+    if bible:
+        rest = before_avoid(rest, bible)
     return f"{take_header(duration, step=0, from_frame=True)}\n{rest}"
 
 
@@ -550,7 +604,8 @@ def video_request(item: dict, aspect: str, resolution: str, previous_id: str | N
         mime = "image/png" if first_frame.suffix.lower() == ".png" else "image/jpeg"
         image = {"type": "image", "mime_type": mime,
                  "data": base64.b64encode(first_frame.read_bytes()).decode()}
-        prompt = item["prompt"] if item.get("step", 0) == 0 else as_fresh_take(item["prompt"], item["duration"])
+        prompt = (item["prompt"] if item.get("step", 0) == 0
+                  else as_fresh_take(item["prompt"], item["duration"], item.get("bible", "")))
         body["input"] = [image, {"type": "text", "text": prompt}]
         task = "image_to_video"
     else:
@@ -609,7 +664,8 @@ def keep_new_part(raw: Path, part: Path, scene_len: float, duration: int) -> flo
 TEXT_CHECK_MODEL = os.getenv("TEXT_CHECK_MODEL", PROMPT_MODEL)
 
 
-class TextCheck(BaseModel):
+class ClipReview(BaseModel):
+    """What Gemini reports after watching a clip: lettering, and what the last frame shows."""
     amount: Literal["none", "minor", "too_much"] = Field(description=(
         "none: no lettering at all. minor: only small, incidental lettering that a viewer "
         "would not notice or that looks natural (a brand logo, UI buttons, icon labels, "
@@ -619,12 +675,20 @@ class TextCheck(BaseModel):
     where: str = Field(description=(
         "Which surface shows the text and roughly where (e.g. 'monitor screen, centre'), "
         "or empty if none."))
+    in_frame: str = Field(description=(
+        "What the final frame shows, as the camera sees it, in at most 70 words: the shot "
+        "size; each person by their name from the cast list (or 'a man'/'a woman'), where "
+        "they are (frame-left, frame-right, centre, foreground, background), which way they "
+        "face and what their hands do; every monitor or screen, on which side of its user it "
+        "stands and what it shows; the props on the desk. Only what is actually visible."))
 
 
-TEXT_CHECK_INSTRUCTIONS = """\
-You check AI-generated video clips for distracting text. The only text in the
-finished video is added later as graphics, so writing the model painted into
-the footage is a problem when it draws attention, above all garbled gibberish.
+REVIEW_INSTRUCTIONS = """\
+You review AI-generated video clips. Two things are needed.
+
+1. Distracting text. The only text in the finished video is added later as
+graphics, so writing the model painted into the footage is a problem when it
+draws attention, above all garbled gibberish.
 
 A small amount is fine and counts as "minor", for example:
 - a brand logo on the back of a monitor or laptop (e.g. a DELL logo, a circular logo)
@@ -634,33 +698,104 @@ A small amount is fine and counts as "minor", for example:
 "too_much" means a lot of text, or prominent gibberish a viewer would notice:
 garbled headings or banners, signs, captions, documents or screens filled with
 lines of fake writing, misspelt words in focus. Plain icons and symbols without
-letters (padlock, checkmark, shapes) are not text. Answer amount and where.
+letters (padlock, checkmark, shapes) are not text.
+
+2. What the final frame shows (in_frame). The next piece of video is generated
+as a continuation of this exact frame, and its prompt will be rewritten to match
+your description, so be literal and precise about sides: use frame-left,
+frame-right, centre, foreground and background as the camera sees them, never a
+bare "left" or "right". Name people with the cast list when they match; say
+which way each person faces and on which side of them their monitor stands.
+List only what is visible in that last frame.
 """
 
 
-def find_text(client, clip: Path) -> str:
-    """Ask Gemini whether a clip shows too much lettering. Returns where it is, or ""
-    when the clip is clean or shows only minor lettering such as logos and buttons."""
+def review_clip(client, clip: Path, cast: str = "") -> ClipReview | None:
+    """Ask Gemini to watch a clip: how much lettering it shows and what its last frame
+    contains. Returns None when the check fails, so a failed review never stops a run."""
     from google.genai import types
     try:
         resp = client.models.generate_content(
             model=TEXT_CHECK_MODEL,
             contents=[types.Part.from_bytes(data=clip.read_bytes(), mime_type="video/mp4"),
-                      "How much text does this clip show?"],
+                      f"CAST:\n{cast or '(unknown)'}\n\nHow much text does this clip show, "
+                      "and what does its final frame contain?"],
             config=types.GenerateContentConfig(
-                system_instruction=TEXT_CHECK_INSTRUCTIONS,
+                system_instruction=REVIEW_INSTRUCTIONS,
                 response_mime_type="application/json",
-                response_schema=TextCheck,
+                response_schema=ClipReview,
             ),
         )
-        check = resp.parsed or TextCheck.model_validate_json(resp.text)
-        check = TextCheck.model_validate(check.model_dump())
+        review = resp.parsed or ClipReview.model_validate_json(resp.text)
+        return ClipReview.model_validate(review.model_dump())
     except Exception as e:  # noqa: BLE001 - a failed check must not stop the run
-        log(f"Warning: text check for {clip.name} failed ({e}); keeping the clip.")
+        log(f"Warning: review of {clip.name} failed ({e}); keeping the clip.")
+        return None
+
+
+def too_much_text(review: ClipReview | None, clip: Path) -> str:
+    """Where the clip shows too much lettering, or "" when it is clean or only shows
+    minor lettering such as logos and buttons."""
+    if review is None:
         return ""
-    if check.amount == "minor":
-        log(f"{clip.name}: minor lettering ({check.where.strip() or 'small'}); keeping it.")
-    return (check.where.strip() or "somewhere in frame") if check.amount == "too_much" else ""
+    if review.amount == "minor":
+        log(f"{clip.name}: minor lettering ({review.where.strip() or 'small'}); keeping it.")
+    return (review.where.strip() or "somewhere in frame") if review.amount == "too_much" else ""
+
+
+IN_FRAME_PREFIX = "IN FRAME NOW: "
+_SHOT_LINES = ("CAMERA", "ACTION", "EXPRESSION", "CONTINUITY")
+
+FIT_INSTRUCTIONS = """\
+You adapt a planned shot to the footage it will continue from. The planned shot
+was written before any video existed; IN FRAME NOW describes what the final
+frame of the previous clip actually shows, and the new clip continues from that
+exact frame. Rewrite camera, action, expression and continuity so they match
+that frame: mention only the people, screens and props it lists, with the sides
+it gives (frame-left, frame-right, centre, foreground, background, never a bare
+"left" or "right"). If the planned action needs something that is not in frame,
+use the nearest thing that is (the person who is there, the screen that is
+there) and keep the point of the action. Nobody enters frame and nothing new
+appears. The camera stays locked off or drifts very slowly within this framing.
+Icons and graphics only on screens. Never quote or name readable text. Keep the
+shot's index and the other fields unchanged; keep every field within its word limit.
+"""
+
+
+def fit_to_footage(client, item: dict, in_frame: str) -> str:
+    """Rewrite the shot lines of a prompt so they match what the previous clip's last
+    frame shows, and put that description near the top. Falls back to adding only the
+    description when the rewrite fails or the prompt has no shot lines."""
+    from google.genai import types
+    lines = item["prompt"].splitlines()
+    fields = {k: v for k, v in (ln.split(": ", 1) for ln in lines if ": " in ln) if k in _SHOT_LINES}
+    if "ACTION" in fields:
+        shot = Shot(index=item["index"], camera=fields.get("CAMERA", ""), action=fields["ACTION"],
+                    expression=fields.get("EXPRESSION", ""), speaker_on_screen=False,
+                    speaker_name="", continuity=fields.get("CONTINUITY", ""))
+        try:
+            resp = client.models.generate_content(
+                model=PROMPT_MODEL,
+                contents=(f"{IN_FRAME_PREFIX}{in_frame}\n\nThe new clip lasts {item['duration']} s"
+                          f". Narration over it: \"{item.get('text', '')}\"\n\nPLANNED SHOT:\n"
+                          + shot.model_dump_json(indent=2)),
+                config=types.GenerateContentConfig(
+                    system_instruction=FIT_INSTRUCTIONS,
+                    response_mime_type="application/json", response_schema=Shot),
+            )
+            fitted = clean_shot(Shot.model_validate((resp.parsed or Shot.model_validate_json(resp.text)).model_dump()))
+            new = {"CAMERA": fitted.camera, "ACTION": fitted.action,
+                   "EXPRESSION": fitted.expression, "CONTINUITY": fitted.continuity}
+
+            def replace(ln: str) -> str:
+                key, sep, _ = ln.partition(": ")
+                return f"{key}: {new[key]}" if sep and key in fields else ln
+            lines = [replace(ln) for ln in lines]
+        except Exception as e:  # noqa: BLE001 - keep the planned shot, add what is in frame
+            log(f"Warning: could not fit clip {item['index']} to the footage ({e}); "
+                "keeping the planned shot.")
+    lines = [ln for ln in lines if not ln.startswith(IN_FRAME_PREFIX)]
+    return "\n".join([lines[0], f"{IN_FRAME_PREFIX}{in_frame}", *lines[1:]])
 
 
 def with_text_fix(prompt: str, where: str) -> str:
@@ -671,21 +806,39 @@ def with_text_fix(prompt: str, where: str) -> str:
     return f"{first}\n{fix}\n{rest}" if rest else f"{first}\n{fix}"
 
 
+def cast_list(items: list[dict]) -> str:
+    """The CHARACTERS lines of the bible, so reviews can name who is in frame."""
+    bible = next((it.get("bible", "") for it in items if it.get("bible")), "")
+    _, _, chars = bible.partition("CHARACTERS")
+    return chars.partition(":\n")[2] if chars else ""
+
+
 def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                    start_image: Path | None, retries: int = 3,
-                   text_retries: int = 2) -> list[Path]:
+                   text_retries: int = 2, fit: bool = True) -> list[Path]:
     """Make one clip per segment. Each scene is a single Omni video: its first segment
     is a new take and every later segment extends it, so people, props and the room
-    carry over. A new scene starts from the last frame of the previous clip."""
+    carry over. A new scene starts from the last frame of the previous clip.
+
+    After each clip Gemini watches it and reports what its last frame shows; the next
+    prompt is rewritten to match that (`fit`), because the plan was written before any
+    footage existed and Omni only continues what it can see."""
     from google import genai
 
     client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
     clip_dir = run / "clips"
     clip_dir.mkdir(exist_ok=True)
     paths = [clip_dir / f"clip_{it['index']:02d}.mp4" for it in items]
-    # Interaction ids let a later step (or a --resume) extend the scene so far.
+    cast = cast_list(items)
+    # Interaction ids let a later step (or a --resume) extend the scene so far; the
+    # review of each clip's last frame is kept beside them for fitting the next prompt.
     state_path = clip_dir / "steps.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    prompts_path = run / "prompts.json"
+
+    def save_prompts() -> None:
+        if prompts_path.exists():
+            prompts_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
 
     def last_frame(i: int) -> Path | None:
         if i == 0:
@@ -722,28 +875,38 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         sys.exit(f"Clip {n} failed {retries} times. "
                  f"Fix the prompt in {run / 'prompts.json'} and rerun with --resume {run}")
 
-    def check_text(i: int, previous_id: str | None, scene_len: float, frame: Path | None) -> None:
-        """Omni sometimes paints lettering anyway; retake the step while Gemini sees any."""
-        if text_retries <= 0:
+    def review(i: int, previous_id: str | None, scene_len: float, frame: Path | None) -> None:
+        """Watch the clip: retake the step while Gemini sees too much lettering (Omni
+        sometimes paints it anyway), then remember what the last frame shows."""
+        if text_retries <= 0 and not fit:
             return
         n = items[i]["index"]
         for take in range(text_retries + 1):
-            where = find_text(client, paths[i])
+            result = review_clip(client, paths[i], cast)
+            where = too_much_text(result, paths[i]) if text_retries > 0 else ""
             if not where:
-                return
+                break
             if take == text_retries:
                 log(f"Warning: clip {n} still shows too much text ({where}) after {text_retries} retake(s); "
                     f"keeping it. Delete {paths[i]} and rerun with --resume {run} to try again.")
-                return
+                break
             log(f"Clip {n} shows too much text ({where}); retaking ({take + 1}/{text_retries})...")
             render(i, {**items[i], "prompt": with_text_fix(items[i]["prompt"], where)},
                    previous_id, scene_len, frame)
+        if result is not None and result.in_frame.strip():
+            state[str(n)]["in_frame"] = result.in_frame.strip()
+            state_path.write_text(json.dumps(state, indent=2))
 
     # Extensions build on the step before, so the clips are made in order.
     for i, item in enumerate(items):
         if paths[i].exists():
             continue
         prev = state.get(str(items[i - 1]["index"]), {}) if i else {}
+        if fit and prev.get("in_frame") and IN_FRAME_PREFIX not in item["prompt"]:
+            log(f"Fitting the prompt of clip {item['index']} to what clip "
+                f"{items[i - 1]['index']} ends on...")
+            item["prompt"] = fit_to_footage(client, item, prev["in_frame"])
+            save_prompts()
         previous_id = prev.get("interaction") if item.get("step", 0) > 0 else None
         scene_len = prev.get("scene_len", 0.0) if previous_id else 0.0
         if previous_id and scene_len + item["duration"] > MAX_SCENE_SECONDS + 0.5:
@@ -758,7 +921,7 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                     "starting a new take from the previous clip's last frame.")
             frame = last_frame(i)
         render(i, item, previous_id, scene_len, frame)
-        check_text(i, previous_id, scene_len, frame)
+        review(i, previous_id, scene_len, frame)
     return paths
 
 
@@ -875,6 +1038,9 @@ def main() -> None:
     ap.add_argument("--text-retries", type=int, default=2, metavar="N",
                     help="Gemini watches each clip for lettering and Omni retakes it up to N times "
                          "(default: 2; 0 turns the check off). Retakes cost video credits.")
+    ap.add_argument("--no-fit", action="store_true",
+                    help="Don't rewrite each prompt to match what the previous clip actually "
+                         "ends on (Gemini describes the last frame of every clip).")
     ap.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation before generating video.")
     args = ap.parse_args()
 
@@ -924,7 +1090,7 @@ def main() -> None:
 
     # 5: clips
     clips = generate_clips(items, run, args.aspect, args.resolution, args.start_image,
-                           text_retries=args.text_retries)
+                           text_retries=args.text_retries, fit=not args.no_fit)
 
     # 6 + 7: assemble
     silent = concatenate(clips, run)

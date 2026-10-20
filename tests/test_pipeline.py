@@ -115,7 +115,7 @@ def test_short_scene_limit_makes_more_scenes():
 
 def _plan(appearance="APPEAR", n_shots=1):
     return mv.VideoPlan(
-        title="t", visual_style="STYLE", setting="SETTING", lighting="LIGHT",
+        title="t", visual_style="STYLE", setting="SETTING", layout="LAY", lighting="LIGHT",
         characters=[mv.Character(name="Ana", appearance=appearance, wardrobe="WARD")],
         shots=[mv.Shot(index=i + 1, camera="CAM", action="ACT", expression="EXP",
                        speaker_on_screen=True, speaker_name="Ana", continuity="CONT")
@@ -127,9 +127,10 @@ def test_build_prompt_repeats_bible_and_dialogue():
     plan = _plan()
     seg = plan_segments(words_from_alignment(fake_alignment("Hi there.")), 1.0)[0]
     p = mv.build_clip_prompt(plan, plan.shots[0], seg, lip_sync=True)
-    for token in ("STYLE", "SETTING", "LIGHT", "APPEAR", "WARD", "CAM", "ACT", "CONT", '"Hi there."'):
+    for token in ("STYLE", "SETTING", "LAY", "LIGHT", "APPEAR", "WARD", "CAM", "ACT", "CONT", '"Hi there."'):
         assert token in p
     assert p.index("CAMERA") < p.index("SETTING"), "shot details should come before the bible"
+    assert p.splitlines()[-1].startswith("AVOID: "), "the avoid list goes last"
     p2 = mv.build_clip_prompt(plan, plan.shots[0], seg, lip_sync=False)
     assert '"Hi there."' not in p2
 
@@ -146,7 +147,16 @@ def test_prompts_say_new_take_or_extension_and_ban_slop():
     assert "first frame" in p3.splitlines()[0]
     for p in (p1, p2, p3):
         assert "AVOID:" in p and "objects suddenly appearing" in p
-    assert mv.as_fresh_take(p2, 8).startswith("Single continuous 8-second shot")
+    # An extension continues footage that already shows the room and the people, so
+    # it carries the shot and nothing else; a new take gets the whole bible.
+    assert "SETTING" in p1 and "SETTING" in p3 and "SETTING" not in p2
+    assert "nobody else enters" in p2.splitlines()[0]
+    fresh = mv.as_fresh_take(p2, 8)
+    assert fresh.startswith("Single continuous 8-second shot") and "SETTING" not in fresh
+    # When an extension has to become a new take the bible goes back in, before AVOID.
+    fresh = mv.as_fresh_take(p2, 8, bible=mv.bible_text(plan))
+    assert "SETTING: SETTING" in fresh and fresh.splitlines()[-1].startswith("AVOID: ")
+    assert fresh.index("ACTION") < fresh.index("SETTING: SETTING")
 
 
 class _CondensingClient:
@@ -159,7 +169,7 @@ class _CondensingClient:
             def generate_content(self, model, contents, config):
                 outer.calls += 1
                 assert config.response_schema is mv.Bible
-                short = mv.Bible(visual_style="STYLE", setting="SETTING", lighting="LIGHT",
+                short = mv.Bible(visual_style="STYLE", setting="SETTING", layout="LAY", lighting="LIGHT",
                                  characters=[mv.Character(name="Ana", appearance="short", wardrobe="WARD")])
                 return SimpleNamespace(parsed=short, text=short.model_dump_json())
         self.models = Models()
@@ -172,8 +182,12 @@ def test_long_prompts_are_condensed_to_fit():
     items = mv.assemble_prompts(client, plan, segs, lip_sync=True)
     assert client.calls == 1
     assert all(len(i["prompt"]) <= mv.MAX_PROMPT_CHARS for i in items)
-    # Both clips still share the exact same character description.
-    assert all("- Ana: short Wearing: WARD" in i["prompt"] for i in items)
+    # The scene's first take has the condensed bible; the extension needs none but
+    # carries it for the case where it has to become a new take.
+    assert [i["step"] for i in items] == [0, 1]
+    assert "- Ana: short Wearing: WARD" in items[0]["prompt"]
+    assert "Wearing: WARD" not in items[1]["prompt"]
+    assert all("- Ana: short Wearing: WARD" in i["bible"] for i in items)
 
 
 def test_short_prompts_are_left_alone():
@@ -235,10 +249,11 @@ def test_video_requests(tmp_path):
     assert ext["previous_interaction_id"] == "int-1" and ext["input"] == item["prompt"]
     assert ext["response_format"]["duration"] == "7s"
     assert "generation_config" not in ext  # Omni rejects a task with previous_interaction_id
-    fresh = mv.video_request(item, "16:9", "720p", None, frame)
+    fresh = mv.video_request({**item, "bible": "STYLE: s\nSETTING: o"}, "16:9", "720p", None, frame)
     assert "previous_interaction_id" not in fresh
     assert fresh["generation_config"]["video_config"]["task"] == "image_to_video"
     image, text = fresh["input"]
     assert image["type"] == "image" and text["text"].startswith("Single continuous 7-second shot")
+    assert text["text"].endswith("ACTION: x\nSTYLE: s\nSETTING: o")
     t2v = mv.video_request({**item, "step": 0}, "9:16", "720p", None, None)
     assert t2v["generation_config"]["video_config"]["task"] == "text_to_video"

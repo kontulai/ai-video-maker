@@ -15,6 +15,8 @@ import make_video as mv
 from fake_omni import FakeInteractions
 from test_pipeline import SCRIPT, fake_alignment
 
+IN_FRAME_LINE = "IN FRAME NOW: Ana centre, bench frame-left"
+
 
 @pytest.mark.parametrize("whole_scene,max_scene", [(False, 30), (True, 30), (False, 10)])
 def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
@@ -54,14 +56,22 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
                                style="bullet", position="bottom-right"),  # moved to the left
                 ])
                 return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
-            if config.response_schema is mv.TextCheck:
+            if config.response_schema is mv.ClipReview:
                 calls["checks"] += 1
-                check = mv.TextCheck(amount="none", where="")
+                assert "- Ana: 40s Wearing: apron" in contents[1]  # the cast list
+                check = mv.ClipReview(amount="none", where="", in_frame="Ana centre, bench frame-left")
                 return SimpleNamespace(parsed=check, text=check.model_dump_json())
+            if config.response_schema is mv.Shot:
+                calls["fits"] = calls.get("fits", 0) + 1
+                assert "IN FRAME NOW: Ana centre" in contents
+                shot = mv.Shot.model_validate_json(contents.partition("PLANNED SHOT:\n")[2])
+                shot = shot.model_copy(update={"action": "works at the bench frame-left"})
+                return SimpleNamespace(parsed=shot, text=shot.model_dump_json())
             assert config.response_schema is mv.VideoPlan
             n = contents.count("\nSegment ")
             plan = mv.VideoPlan(
                 title="Bird feeder", visual_style="photoreal", setting="workshop", lighting="sun",
+                layout="Ana centre facing frame-right",
                 characters=[mv.Character(name="Ana", appearance="40s", wardrobe="apron")],
                 shots=[mv.Shot(index=i + 1, camera="medium", action="works", expression="smiles",
                                speaker_on_screen=True, speaker_name="Ana", continuity="same")
@@ -98,7 +108,18 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
     for p in prompts:
         clip = run / "clips" / f"clip_{p['index']:02d}.mp4"
         assert abs(mv.media_duration(clip) - p["duration"]) < 0.1
-    assert calls["checks"] == len(prompts)  # every clip was checked for lettering
+    assert calls["checks"] == len(prompts)  # every clip was reviewed
+    # Every prompt after the first was fitted to what the previous clip ends on, and
+    # the fitted prompts were saved so --resume uses them.
+    assert calls["fits"] == len(prompts) - 1
+    assert IN_FRAME_LINE not in prompts[0]["prompt"]
+    for p in prompts[1:]:
+        assert p["prompt"].splitlines()[1] == IN_FRAME_LINE
+        assert "ACTION: works at the bench frame-left" in p["prompt"]
+    # Only a scene's first take carries the bible; extensions continue the footage.
+    for p in prompts:
+        assert ("LAYOUT (as the camera sees it): Ana centre" in p["prompt"]) == (p["step"] == 0)
+        assert p["prompt"].splitlines()[-1].startswith("AVOID: ")
     # Keyword graphics: one kept, the clip gets a layout hint, and they were burned in.
     callouts = json.loads((run / "callouts.json").read_text())
     assert [c["text"] for c in callouts["callouts"]] == ["Build it", "Point two"]
