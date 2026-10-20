@@ -26,7 +26,10 @@ COST_CUT_INSIDE_WORD = 10.0
 BONUS_SENTENCE_END = 3.0
 BONUS_CLAUSE_END = 1.5
 BONUS_PAUSE = 0.5          # any gap between words
-COST_PER_SEGMENT = 1.5     # prefer fewer, longer steps (cheaper, fewer seams)
+# Inside a scene an extension continues the same video, so a step cut is not
+# visible. Use as few steps as possible (10 s each where it fits); the cut
+# costs above only pick between plans with the same number of steps.
+COST_PER_SEGMENT = 30.0
 COST_SCENE_BREAK = 100.0   # a new take is a visible jump: as few as possible
 SCENE_BREAK_WEIGHT = 3.0   # ...and placed at a sentence end if at all possible
 

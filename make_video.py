@@ -879,10 +879,13 @@ def main() -> None:
         sys.exit(f"--max-scene must be between 10 and {MAX_SCENE_SECONDS}.")
     segments = plan_segments(words_from_alignment(alignment), duration, args.max_scene)
     (run / "segments.json").write_text(json.dumps([s.to_dict() for s in segments], indent=2))
-    log("Segments: " + " | ".join(
-        f"scene {n}: " + " + ".join(f"{s.duration}s" for s in segments if s.scene == n)
-        for n in range(1, segments[-1].scene + 1))
-        + f" = {segments[-1].end}s for {duration:.1f}s of audio")
+    log(f"{segments[-1].scene} scene(s), {segments[-1].end}s for {duration:.1f}s of audio. "
+        "Each scene is one video: a new take, then extended step by step.")
+    for n in range(1, segments[-1].scene + 1):
+        steps = [s for s in segments if s.scene == n]
+        ext = " ".join(f"+{s.duration}s" for s in steps[1:]) or "none"
+        log(f"  Scene {n}: {sum(s.duration for s in steps)}s = {steps[0].duration}s take, "
+            f"extended {ext}")
     items = plan_prompts(scene, talk, segments, run, not args.no_lip_sync)
     if [(i["index"], i["duration"]) for i in items] != [(s.index, s.duration) for s in segments]:
         sys.exit(f"{run / 'prompts.json'} was planned with different segments (an older version of "

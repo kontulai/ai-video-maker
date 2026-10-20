@@ -76,7 +76,7 @@ def test_prefers_sentence_ends():
     words = [Word("a", 0.0, 1.0), Word("b.", 1.1, 3.9), Word("c", 4.1, 5.0),
              Word("d.", 5.1, 7.9), Word("e", 8.1, 9.0), Word("f.", 9.1, 11.5)]
     segs = plan_segments(words, 11.7)
-    assert [s.end for s in segs][:-1] in ([4, 8], [8])
+    assert [s.end for s in segs][:-1] in ([4], [8])  # 2 steps, cut at a sentence end
 
 
 def _sentences(n: int, every: int = 8) -> list[Word]:
