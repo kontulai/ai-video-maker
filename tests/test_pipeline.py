@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import make_video as mv
-from segmentation import Word, plan_segments, target_length, words_from_alignment
+from segmentation import (Segment, Word, apply_scene_plan, plan_segments, target_length,
+                          words_from_alignment)
 
 
 def fake_alignment(text: str, wps: float = 2.6) -> dict:
@@ -114,7 +115,7 @@ def test_short_scene_limit_makes_more_scenes():
 
 
 def _plan(appearance="APPEAR", n_shots=1):
-    return mv.VideoPlan(
+    return mv.VideoPlan(scenes=[],
         title="t", visual_style="STYLE", setting="SETTING", layout="LAY", lighting="LIGHT",
         characters=[mv.Character(name="Ana", appearance=appearance, wardrobe="WARD")],
         shots=[mv.Shot(index=i + 1, camera="CAM", action="ACT", expression="EXP",
@@ -135,21 +136,42 @@ def test_build_prompt_repeats_bible_and_dialogue():
     assert '"Hi there."' not in p2
 
 
+def test_planner_regroups_steps_into_scenes():
+    segs = [Segment(i + 1, 10 * i, 10 * i + 10, 10, "", scene=1 + i // 3, step=i % 3)
+            for i in range(6)]
+    # Gemini: a cut at step 3 (new idea), continue at step 5; step 1 always opens.
+    out = apply_scene_plan(segs, {3: True, 5: False}, max_scene=30)
+    assert [(s.scene, s.step, s.cut) for s in out] == [
+        (1, 0, False), (1, 1, False), (2, 0, True), (2, 1, False), (3, 0, False), (3, 1, False)]
+    assert [(s.index, s.start, s.text) for s in out] == [(s.index, s.start, s.text) for s in segs]
+    # A scene the planner left too long is split where it must be, continuing from the frame.
+    out = apply_scene_plan(segs, {1: True}, max_scene=30)
+    assert [(s.scene, s.step, s.cut) for s in out] == [
+        (1, 0, False), (1, 1, False), (1, 2, False), (2, 0, False), (2, 1, False), (2, 2, False)]
+    # Older runs saved segments without the cut field; prompt items carry extra keys.
+    assert Segment.from_dict({"index": 1, "start": 0, "end": 4, "duration": 4, "text": "a",
+                              "scene": 1, "step": 0, "prompt": "x"}) == Segment(1, 0, 4, 4, "a")
+
+
 def test_prompts_say_new_take_or_extension_and_ban_slop():
     plan = _plan()
     first = mv.Segment(1, 0, 6, 6, "a", scene=1, step=0)
     ext = mv.Segment(2, 6, 14, 8, "b", scene=1, step=1)
     new_scene = mv.Segment(3, 14, 20, 6, "c", scene=2, step=0)
-    p1, p2, p3 = (mv.build_clip_prompt(plan, plan.shots[0], s, lip_sync=False)
-                  for s in (first, ext, new_scene))
+    cut = mv.Segment(3, 14, 20, 6, "c", scene=2, step=0, cut=True)
+    p1, p2, p3, p4 = (mv.build_clip_prompt(plan, plan.shots[0], s, lip_sync=False)
+                      for s in (first, ext, new_scene, cut))
     assert p1.startswith("Single continuous 6-second shot") and "first frame" not in p1
     assert p2.startswith("Extend this video by 8 seconds")
     assert "first frame" in p3.splitlines()[0]
-    for p in (p1, p2, p3):
+    # A cut is a fresh take of the same film: no first frame, but the same look and people.
+    assert p4.startswith("Single continuous 6-second shot") and "first frame" not in p4
+    assert "new setup of the same film" in p4.splitlines()[0]
+    for p in (p1, p2, p3, p4):
         assert "AVOID:" in p and "objects suddenly appearing" in p
     # An extension continues footage that already shows the room and the people, so
     # it carries the shot and nothing else; a new take gets the whole bible.
-    assert "SETTING" in p1 and "SETTING" in p3 and "SETTING" not in p2
+    assert "SETTING" in p1 and "SETTING" in p3 and "SETTING" in p4 and "SETTING" not in p2
     assert "nobody else enters" in p2.splitlines()[0]
     fresh = mv.as_fresh_take(p2, 8)
     assert fresh.startswith("Single continuous 8-second shot") and "SETTING" not in fresh
@@ -188,6 +210,25 @@ def test_long_prompts_are_condensed_to_fit():
     assert "- Ana: short Wearing: WARD" in items[0]["prompt"]
     assert "Wearing: WARD" not in items[1]["prompt"]
     assert all("- Ana: short Wearing: WARD" in i["bible"] for i in items)
+
+
+def test_cut_scene_gets_its_own_setting_and_layout():
+    plan = _plan(n_shots=3)
+    plan.scenes = [mv.ScenePlan(first_segment=1, cut=False),
+                   mv.ScenePlan(first_segment=2, cut=True, setting="the lathe corner",
+                                layout="Ana frame-right at the lathe"),
+                   mv.ScenePlan(first_segment=3, cut=False, setting="ignored: not a cut")]
+    segs = [mv.Segment(1, 0, 5, 5, "a"), mv.Segment(2, 5, 10, 5, "b", scene=2, step=0, cut=True),
+            mv.Segment(3, 10, 15, 5, "c", scene=3, step=0)]
+    items = mv.assemble_prompts(_CondensingClient(), plan, segs, lip_sync=False)
+    assert "SETTING: SETTING" in items[0]["prompt"] and "LAY" in items[0]["prompt"]
+    assert "SETTING: the lathe corner" in items[1]["prompt"]
+    assert "LAYOUT (as the camera sees it): Ana frame-right at the lathe" in items[1]["prompt"]
+    assert "STYLE: STYLE" in items[1]["prompt"] and "WARD" in items[1]["prompt"]  # rest of the bible
+    assert "SETTING: SETTING" in items[2]["prompt"] and "ignored" not in items[2]["prompt"]
+    # The bible saved with the item is the one its prompt used.
+    assert "the lathe corner" in items[1]["bible"] and "the lathe corner" not in items[2]["bible"]
+    assert [i["cut"] for i in items] == [False, True, False]
 
 
 def test_short_prompts_are_left_alone():

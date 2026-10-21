@@ -5,10 +5,12 @@ Pipeline
   1. Ask for the setting / scene description.
   2. Ask for the talk track (the words to be spoken).
   3. Generate the voice track with ElevenLabs (with word timings).
-  4. Split the talk track into 3-10 s segments grouped into scenes of up to
-     30 s, and have Gemini write a continuity-preserving prompt for each one.
+  4. Split the talk track into 3-10 s segments, and have Gemini group them into
+     scenes that follow the narration (a new idea can start a new scene) and
+     write a continuity-preserving prompt for each segment.
   5. Generate each scene with Gemini Omni 1.1 Flash: the first segment is a
-     new take and every later segment extends that same video.
+     new take (a cut to a new setup, or a continuation from the last frame of
+     the previous scene) and every later segment extends that same video.
   6. Concatenate the segments.
   7. Lay the voice track over the final video, with infomercial-style keyword
      graphics (chosen by Gemini) burned in.
@@ -38,7 +40,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 import callouts as fx
-from segmentation import MAX_SCENE_SECONDS, Segment, plan_segments, words_from_alignment
+from segmentation import (MAX_SCENE_SECONDS, Segment, apply_scene_plan, plan_segments,
+                          words_from_alignment)
 
 load_dotenv()
 
@@ -203,18 +206,59 @@ class Shot(BaseModel):
         "eyeline, motion), at most 25 words."))
 
 
+class ScenePlan(BaseModel):
+    """One continuous take, as the planner groups the segments."""
+    first_segment: int = Field(description="Index of the segment this scene starts with.")
+    cut: bool = Field(description=(
+        "True: a cut to a new setup of the same film (new angle, another part of the "
+        "location, a close-up, B-roll, the other character), generated as a fresh take. "
+        "False: the take restarts from the exact last frame of the previous scene, with "
+        "no visible jump. Ignored for the first scene."))
+    setting: str = Field(default="", description=(
+        "For a cut: which part of the location this scene shows and what is in the "
+        "background, at most 40 words, consistent with the bible's setting. Empty otherwise."))
+    layout: str = Field(default="", description=(
+        "For a cut: where everyone and everything sits in this scene's first shot as the "
+        "camera sees it, at most 40 words, using only frame-left, frame-right, centre, "
+        "foreground and background. Empty otherwise."))
+    reason: str = Field(default="", description="Why the scene changes here, at most 12 words.")
+
+
 class VideoPlan(Bible):
     title: str
+    scenes: list[ScenePlan] = Field(description=(
+        "The scenes in order. The first starts with segment 1."))
     shots: list[Shot]
 
 
 PLANNER_INSTRUCTIONS = """\
 You are a film director and prompt engineer for Google Gemini Omni, a video
 model that can extend a video it generated. You will receive a creative brief,
-a narration script and a list of timed segments grouped into scenes. Each scene
-is ONE unbroken take: its first segment is generated fresh and every later
-segment extends that same video by 3 to 10 seconds. A new scene starts from the
-exact last frame of the previous scene. The narration is laid over the top.
+a narration script and a list of timed segments of 3 to 10 seconds. You group
+the segments into scenes and write one shot per segment. The narration is laid
+over the top.
+
+SCENES. A scene is ONE unbroken take: its first segment is generated fresh and
+every later segment extends that same video, so inside a scene nothing can cut
+or jump. Omni extends a take to at most the length given in the message, so a
+scene must end at or before that (a longer one is split for you). Place the
+scene breaks where the narration moves on: a new concept or topic, the next
+item of a list, a new speaker, a change of mood, the call to action. Not every
+sentence is a new scene: a scene of one or two ideas, usually 10 to 30 seconds,
+reads well, while a break every few seconds looks like a slideshow. You choose
+how each scene after the first starts:
+- cut: a fresh take with a new setup in the same film: a different angle or
+  shot size, another part of the same location, a close-up of a prop or a
+  screen, B-roll of the thing being talked about, or the other character. Use
+  it when the narration brings up something new. The visual style, location,
+  light and every character's face, hair and wardrobe stay exactly as in the
+  bible; give the scene its own setting detail and layout for its first shot.
+- continue: the take restarts from the exact last frame of the previous scene
+  with no visible jump. Use it when the moment simply goes on (the same action
+  or conversation) and the take only has to be restarted. Its first shot holds
+  that framing, people and screen content.
+List the scenes in `scenes`, in order, starting with segment 1. Steps are
+listed with their times; a scene break can only fall between two segments.
 
 Consistency comes from the extensions and from the prompts. Produce a
 production bible (visual style, setting, layout, lighting, characters) that
@@ -223,7 +267,10 @@ hairstyles, clothing details. Never use vague words like "stylish" or "modern"
 without saying exactly what they look like. The bible goes word for word into
 the first prompt of every scene, and the model only reads about 900 words in
 total, so respect the word limit on every field. Write dense noun phrases, not
-full sentences; no filler, no repetition between fields.
+full sentences; no filler, no repetition between fields. A cut scene's first
+prompt gets the bible with that scene's own setting and layout in place of the
+bible's, so a cut may show another part of the location or a closer framing,
+but never another location, another look or other people.
 
 LAYOUT. Positions are always given as the camera sees them, using only the
 words frame-left, frame-right, centre, foreground and background. A bare
@@ -236,29 +283,31 @@ same terms in every camera, action and continuity field.
 Then write exactly one shot per segment, in order, with the same index. Match
 the visuals to what is being said in that segment and to its duration. Keep
 the same characters, wardrobe and location in every shot unless the brief
-explicitly asks otherwise. Each shot continues exactly where the previous one
-ended (same framing, positions and props); never plan a cut or a jump to a new
-angle or location. Describe only what can happen in that many seconds of the
-same take.
+explicitly asks otherwise. Within a scene each shot continues exactly where
+the previous one ended (same framing, positions and props); the only cuts in
+the film are the scene breaks you planned as cuts. Describe only what can
+happen in that many seconds of the same take.
 
 CAMERA. A scene's first shot sets the framing. Every later shot in that scene
 keeps it: the camera is locked off or drifts very slowly (a gentle push-in or
 small reframe) and never pans, tilts, dollies or zooms out to reveal areas or
 people that were not visible in the scene's first shot. All action happens
-within what is already in frame.
+within what is already in frame. A cut scene's first shot is where the framing
+may change: a new angle, a closer or wider shot, another part of the location.
 
-SCENE STARTS. A new scene is generated from a still of the previous scene's
-final frame, so its first shot must hold that framing, people and screen
-content and must not pan or move to another desk or person: the model cannot
-see what is outside the still and invents it. If the story moves to another
-character or desk, the previous scene's last shot is the one place a slow
-reframe may bring them into frame, ending with them clearly visible, so that
-the next scene opens on them. Plan the end of each scene around what the next
-scene opens on.
+CONTINUED SCENES. A continued scene is generated from a still of the previous
+scene's final frame, so its first shot must hold that framing, people and
+screen content and must not pan or move to another desk or person: the model
+cannot see what is outside the still and invents it. If the story moves to
+another character or desk, either cut to them, or let the previous scene's
+last shot slowly reframe to bring them in, ending with them clearly visible,
+so that the continued scene opens on them. Plan the end of each scene around
+what the next scene opens on.
 
 PEOPLE. Only characters visible in a scene's first shot appear in that scene.
 Nobody walks in, leans in or appears in the background later; the model
-invents a new person when asked for one who is not in frame.
+invents a new person when asked for one who is not in frame. A cut is the way
+to bring another character into the film: open the new scene on them.
 
 NO AI SLOP. Nothing appears, disappears or changes by itself. Every object in
 frame is in the bible's setting or is visibly brought in by a character (picked
@@ -385,13 +434,19 @@ def clean_bible(bible: Bible) -> Bible:
         "characters": chars})
 
 
-def take_header(duration: int, step: int, from_frame: bool = False) -> str:
+def take_header(duration: int, step: int, from_frame: bool = False, cut: bool = False) -> str:
     if step > 0:
         return (f"Extend this video by {duration} seconds as the same continuous shot; no cut. "
                 "Everyone and everything already in frame stays exactly as it is; "
                 "nothing and nobody else enters.")
-    start = (" It starts exactly on the given first frame and holds that framing; the people "
-             "in it keep exactly the same face, hair and clothes." if from_frame else "")
+    if from_frame:
+        start = (" It starts exactly on the given first frame and holds that framing; the people "
+                 "in it keep exactly the same face, hair and clothes.")
+    elif cut:
+        start = (" A new setup of the same film: the same look, location and light, the same "
+                 "people with exactly the same face, hair and clothes, framed as described.")
+    else:
+        start = ""
     return f"Single continuous {duration}-second shot from one film; no scene cuts.{start}"
 
 
@@ -413,10 +468,21 @@ def build_clip_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) ->
     # scene's first take gets the bible: an extension continues footage that already
     # shows the people and the room, and re-listing every prop and person invites the
     # model to add the ones that are not in frame.
-    body = f"{take_header(seg.duration, seg.step, from_frame=seg.scene > 1)}\n{shot_lines(shot, seg.text, lip_sync)}"
+    header = take_header(seg.duration, seg.step, from_frame=seg.scene > 1 and not seg.cut, cut=seg.cut)
+    body = f"{header}\n{shot_lines(shot, seg.text, lip_sync)}"
     if seg.step == 0:
         body += f"\n{bible_text(bible)}"
     return f"{body}\nAVOID: {NEGATIVE_PROMPT}."
+
+
+def scene_bible(bible: Bible, seg: Segment, scenes: dict[int, ScenePlan]) -> Bible:
+    """The bible for a segment's prompt: a cut scene's first take shows the part of the
+    location and the framing the planner gave that scene."""
+    plan = scenes.get(seg.index) if seg.step == 0 and seg.cut else None
+    if plan is None:
+        return bible
+    own = {k: v for k in ("setting", "layout") if (v := getattr(plan, k).strip())}
+    return clean_bible(bible.model_copy(update=own)) if own else bible
 
 
 def condense_bible(client, bible: Bible, max_chars: int) -> Bible:
@@ -451,14 +517,17 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
     pairs = list(zip(segments, remove_screen_text(client, chosen)))
 
     bible = clean_bible(Bible.model_validate(plan.model_dump()))
+    scenes = {sp.first_segment: sp for sp in plan.scenes}
     for attempt in range(attempts + 1):
-        prompts = [build_clip_prompt(bible, shot, seg, lip_sync) for seg, shot in pairs]
+        bibles = [scene_bible(bible, seg, scenes) for seg, _ in pairs]
+        prompts = [build_clip_prompt(b, shot, seg, lip_sync) for b, (seg, shot) in zip(bibles, pairs)]
         longest = max(len(p) for p in prompts)
         if longest <= max_chars or attempt == attempts:
             break
         # Room left for the bible in the longest prompt that carries it, with a little slack.
-        longest_take = max(len(p) for p, (seg, _) in zip(prompts, pairs) if seg.step == 0)
-        room = max_chars - (longest_take - len(bible_text(bible))) - 100
+        longest_take = max(len(p) - len(bible_text(b)) for p, b, (seg, _) in zip(prompts, bibles, pairs)
+                           if seg.step == 0)
+        room = max_chars - longest_take - 100
         if room < 400:
             log("Warning: shot descriptions alone are close to the prompt limit; "
                 "consider shorter segments of narration.")
@@ -470,12 +539,31 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
             log(f"Warning: prompt {i} is {len(p)} chars (limit ~{max_chars}); "
                 "the model may ignore the end. Edit prompts.json to shorten it.")
     # The bible rides along so an extension that has to become a new take can get it back.
-    return [{**seg.to_dict(), "prompt": p, "bible": bible_text(bible)}
-            for (seg, _), p in zip(pairs, prompts)]
+    return [{**seg.to_dict(), "prompt": p, "bible": bible_text(b)}
+            for (seg, _), p, b in zip(pairs, prompts, bibles)]
+
+
+def scenes_from_plan(plan: VideoPlan, segments: list[Segment], max_scene: int) -> list[Segment]:
+    """Regroup the steps into the planner's scenes. Without a usable scene list the
+    timing-based grouping stands."""
+    valid = {sp.first_segment: sp for sp in plan.scenes if 1 <= sp.first_segment <= len(segments)}
+    if not valid:
+        if plan.scenes:
+            log("Warning: the planner's scene list names no existing segment; keeping the "
+                "timing-based scenes.")
+        return segments
+    out = apply_scene_plan(segments, {i: sp.cut for i, sp in valid.items()}, max_scene)
+    for s in out:
+        if s.step == 0 and s.index in valid and valid[s.index].reason:
+            log(f"  Scene {s.scene} ({'cut' if s.cut else 'continues' if s.scene > 1 else 'opens'}"
+                f" at {s.start}s): {valid[s.index].reason}")
+    return out
 
 
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
-                 lip_sync: bool) -> list[dict]:
+                 lip_sync: bool, max_scene: int = MAX_SCENE_SECONDS) -> list[dict]:
+    """Have Gemini write the production bible, group the steps into scenes and write one
+    shot per step; returns one item per step with the prompt and the scene assignment."""
     prompts_path = run / "prompts.json"
     if prompts_path.exists():
         log("Prompts already exist, skipping planning.")
@@ -486,11 +574,7 @@ def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path
 
     client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
     seg_list = "\n".join(
-        f"Segment {s.index}: {s.start}s-{s.end}s ({s.duration}s), scene {s.scene}, "
-        + ("new take" if s.step == 0 and s.scene == 1 else
-           "starts from the last frame of the previous scene" if s.step == 0 else
-           "extends the same take")
-        + f". Narration: \"{s.text}\""
+        f"Segment {s.index}: {s.start}s-{s.end}s ({s.duration}s). Narration: \"{s.text}\""
         for s in segments
     )
     user_msg = f"""CREATIVE BRIEF (setting, scene, characters, style):
@@ -499,7 +583,8 @@ def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path
 FULL NARRATION SCRIPT:
 {talk_track}
 
-SEGMENTS ({len(segments)} segments in {segments[-1].scene} scene(s), write one shot for each):
+SEGMENTS ({len(segments)} segments, {segments[-1].end}s in all; group them into scenes of at most
+{max_scene}s each and write one shot for each segment):
 {seg_list}
 """
     log(f"Planning {len(segments)} shots with {PROMPT_MODEL}...")
@@ -515,6 +600,7 @@ SEGMENTS ({len(segments)} segments in {segments[-1].scene} scene(s), write one s
     plan: VideoPlan = resp.parsed or VideoPlan.model_validate_json(resp.text)
     (run / "plan.json").write_text(plan.model_dump_json(indent=2))
 
+    segments = scenes_from_plan(plan, segments, max_scene)
     out = assemble_prompts(client, plan, segments, lip_sync)
     longest = max(len(o["prompt"]) for o in out)
     log(f"Built {len(out)} prompts (longest {longest} chars, limit ~{MAX_PROMPT_CHARS}).")
@@ -837,7 +923,8 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                    text_retries: int = 2, fit: bool = True) -> list[Path]:
     """Make one clip per segment. Each scene is a single Omni video: its first segment
     is a new take and every later segment extends it, so people, props and the room
-    carry over. A new scene starts from the last frame of the previous clip.
+    carry over. A new scene either starts from the last frame of the previous clip or,
+    when the planner cut to a new setup, from the prompt alone.
 
     After each clip Gemini watches it and reports what its last frame shows; the next
     prompt is rewritten to match that (`fit`), because the plan was written before any
@@ -870,7 +957,8 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         every attempt fails; an optional one (a retake) just reports False."""
         n, raw = item["index"], paths[i].with_suffix(".raw.mp4")
         for attempt in range(1, retries + 1):
-            kind = "extending the scene" if previous_id else "new take"
+            kind = ("extending the scene" if previous_id else
+                    "new take from a frame" if frame is not None else "new take")
             try:
                 log(f"Clip {n}/{len(items)} ({item['duration']}s, scene {item.get('scene', 1)}, "
                     f"{kind}), attempt {attempt}...")
@@ -936,7 +1024,9 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         if paths[i].exists():
             continue
         prev = state.get(str(items[i - 1]["index"]), {}) if i else {}
-        if fit and prev.get("in_frame") and IN_FRAME_PREFIX not in item["prompt"]:
+        # A cut opens on a new setup, so it neither continues the last frame nor fits to it.
+        cut = i > 0 and item.get("step", 0) == 0 and item.get("cut", False)
+        if fit and not cut and prev.get("in_frame") and IN_FRAME_PREFIX not in item["prompt"]:
             log(f"Fitting the prompt of clip {item['index']} to what clip "
                 f"{items[i - 1]['index']} ends on...")
             item["prompt"] = fit_to_footage(client, item, prev["in_frame"])
@@ -949,7 +1039,7 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                 f"over Omni's {MAX_SCENE_SECONDS}s; starting a new take from the last frame.")
             previous_id, scene_len = None, 0.0
         frame = None
-        if not previous_id:
+        if not previous_id and not cut:
             if item.get("step", 0) > 0 and str(items[i - 1]["index"]) not in state:
                 log(f"No saved interaction to extend for clip {item['index']}; "
                     "starting a new take from the previous clip's last frame.")
@@ -1026,7 +1116,9 @@ def confirm_prompts(items: list[dict], run: Path) -> list[dict]:
     callouts_path = run / "callouts.json"
     print("\n" + "=" * 78)
     for it in items:
-        kind = "new take" if it.get("step", 0) == 0 else "extends the take"
+        kind = ("extends the take" if it.get("step", 0) > 0 else
+                "new take (cut)" if it.get("cut") else
+                "new take from the last frame" if it.get("scene", 1) > 1 else "new take")
         print(f"\n--- Clip {it['index']} | {it['start']}-{it['end']}s ({it['duration']}s) | "
               f"scene {it.get('scene', 1)}, {kind} ---")
         print(it["prompt"])
@@ -1064,7 +1156,7 @@ def main() -> None:
     ap.add_argument("--resolution", default="720p", choices=["360p", "720p", "1080p", "4k"],
                     help="1080p and 4k are upscaled by Omni (default: 720p).")
     ap.add_argument("--max-scene", type=int, default=MAX_SCENE_SECONDS, metavar="SECONDS",
-                    help="Longest single take before a new scene starts from the last frame "
+                    help="Longest single take before a new scene has to start "
                          f"(10-{MAX_SCENE_SECONDS}, default {MAX_SCENE_SECONDS}).")
     ap.add_argument("--no-lip-sync", action="store_true",
                     help="Don't put the spoken line in the prompt (on-screen mouths won't move with the words).")
@@ -1104,21 +1196,27 @@ def main() -> None:
     seg_path = run / "segments.json"
     if (run / "prompts.json").exists() and seg_path.exists():
         # Resuming: keep the plan the prompts were written for.
-        segments = [Segment(**d) for d in json.loads(seg_path.read_text())]
+        segments = [Segment.from_dict(d) for d in json.loads(seg_path.read_text())]
     else:
         segments = plan_segments(words_from_alignment(alignment), duration, args.max_scene)
     seg_path.write_text(json.dumps([s.to_dict() for s in segments], indent=2))
-    log(f"{segments[-1].scene} scene(s), {segments[-1].end}s for {duration:.1f}s of audio. "
-        "Each scene is one video: a new take, then extended step by step.")
-    for n in range(1, segments[-1].scene + 1):
-        steps = [s for s in segments if s.scene == n]
-        ext = " ".join(f"+{s.duration}s" for s in steps[1:]) or "none"
-        log(f"  Scene {n}: {sum(s.duration for s in steps)}s = {steps[0].duration}s take, "
-            f"extended {ext}")
-    items = plan_prompts(scene, talk, segments, run, not args.no_lip_sync)
+    log(f"{len(segments)} steps, {segments[-1].end}s for {duration:.1f}s of audio.")
+    items = plan_prompts(scene, talk, segments, run, not args.no_lip_sync, args.max_scene)
     if [(i["index"], i["duration"]) for i in items] != [(s.index, s.duration) for s in segments]:
         sys.exit(f"{run / 'prompts.json'} was planned with different segments (an older version of "
                  "this script?). Start a new run, or delete prompts.json and callouts.json.")
+    # The planner groups the steps into scenes; the prompts carry that grouping.
+    segments = [Segment.from_dict(it) for it in items]
+    seg_path.write_text(json.dumps([s.to_dict() for s in segments], indent=2))
+    log(f"{segments[-1].scene} scene(s). Each scene is one video: a new take, then extended "
+        "step by step.")
+    for n in range(1, segments[-1].scene + 1):
+        steps = [s for s in segments if s.scene == n]
+        ext = " ".join(f"+{s.duration}s" for s in steps[1:]) or "none"
+        how = ("cut to a new setup" if steps[0].cut else
+               "from the last frame" if n > 1 else "new take")
+        log(f"  Scene {n}: {sum(s.duration for s in steps)}s = {steps[0].duration}s {how}, "
+            f"extended {ext}")
     callout_data = plan_callouts(items, segments, run, args.callouts)
     if not args.yes:
         items = confirm_prompts(items, run)

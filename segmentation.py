@@ -9,14 +9,17 @@ programming so the cuts land in pauses between words (ideally at the end of a
 sentence) instead of in the middle of a word.
 
 Segments are then grouped into scenes. Omni extends one video to at most 30
-seconds, so a longer talk track needs several scenes; each new scene starts
-from the last frame of the previous one.
+seconds, so a longer talk track needs several scenes. plan_segments groups them
+by timing alone (as few scenes as possible, broken at sentence ends); the
+planner model may regroup them with apply_scene_plan so that a scene changes
+where the narration moves to a new idea, either as a cut to a new setup or by
+continuing from the last frame of the previous scene.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields, replace
 
 DURATIONS = tuple(range(3, 11))   # Omni: 3-10 s per generation or extension
 # Google's docs say 40 s, but extending past 30 s is rejected in practice (400
@@ -52,9 +55,18 @@ class Segment:
     text: str
     scene: int = 1      # which continuous take this segment belongs to
     step: int = 0       # 0 = the scene's first take, 1+ = extensions of it
+    # For a scene's first take: True = a cut to a new setup (fresh take, no first
+    # frame given); False = continues from the last frame of the previous scene.
+    cut: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Segment":
+        """Build from a dict that may carry extra keys (a prompts.json item) or lack
+        the newer fields (a segments.json from an older version)."""
+        return cls(**{f.name: d[f.name] for f in fields(cls) if f.name in d})
 
 
 def words_from_alignment(alignment: dict) -> list[Word]:
@@ -163,3 +175,26 @@ def plan_segments(words: list[Word], audio_duration: float,
         segments.append(Segment(i + 1, a, b, b - a, " ".join(seg_words), scene, step))
         step += 1
     return segments
+
+
+def apply_scene_plan(segments: list[Segment], starts: dict[int, bool],
+                     max_scene: int = MAX_SCENE_SECONDS) -> list[Segment]:
+    """Regroup the steps into the scenes a planner chose: `starts` maps the index of
+    each scene's first segment to whether that scene is a cut (a fresh take with a
+    new setup) rather than a continuation from the previous scene's last frame.
+    Segment 1 always opens the first scene, which is a fresh take either way. A
+    scene that would run past max_scene is split where it must be, continuing
+    from the last frame, since Omni cannot extend a video further."""
+    out: list[Segment] = []
+    scene, step, length = 0, 0, 0
+    for s in segments:
+        opens = scene == 0 or s.index in starts
+        cut = scene > 0 and bool(starts.get(s.index, False))
+        if not opens and length + s.duration > max_scene:
+            opens, cut = True, False
+        if opens:
+            scene, step, length = scene + 1, 0, 0
+        out.append(replace(s, scene=scene, step=step, cut=cut))
+        step += 1
+        length += s.duration
+    return out

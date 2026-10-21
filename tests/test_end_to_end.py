@@ -18,8 +18,11 @@ from test_pipeline import SCRIPT, fake_alignment
 IN_FRAME_LINE = "IN FRAME NOW: Ana centre, bench frame-left"
 
 
-@pytest.mark.parametrize("whole_scene,max_scene", [(False, 30), (True, 30), (False, 10)])
-def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
+@pytest.mark.parametrize("whole_scene,max_scene,cut", [(False, 30, False), (True, 30, False),
+                                                       (False, 10, False), (False, 30, True)])
+def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene, cut):
+    """cut=True: the planner cuts to a new setup at the second step instead of leaving
+    the timing-based single scene."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
@@ -68,10 +71,14 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
                 shot = shot.model_copy(update={"action": "works at the bench frame-left"})
                 return SimpleNamespace(parsed=shot, text=shot.model_dump_json())
             assert config.response_schema is mv.VideoPlan
+            assert f"scenes of at most\n{max_scene}s" in contents and ", scene " not in contents
             n = contents.count("\nSegment ")
+            scenes = [mv.ScenePlan(first_segment=1, cut=False),
+                      mv.ScenePlan(first_segment=2, cut=True, setting="the lathe corner",
+                                   layout="Ana frame-right at the lathe", reason="new tool")] if cut else []
             plan = mv.VideoPlan(
                 title="Bird feeder", visual_style="photoreal", setting="workshop", lighting="sun",
-                layout="Ana centre facing frame-right",
+                layout="Ana centre facing frame-right", scenes=scenes,
                 characters=[mv.Character(name="Ana", appearance="40s", wardrobe="apron")],
                 shots=[mv.Shot(index=i + 1, camera="medium", action="works", expression="smiles",
                                speaker_on_screen=True, speaker_name="Ana", continuity="same")
@@ -91,34 +98,51 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene):
     run = next((tmp_path / "runs").iterdir())
     prompts = json.loads((run / "prompts.json").read_text())
     assert [b["response_format"]["duration"] for b in omni.bodies] == [f"{p['duration']}s" for p in prompts]
-    # Clip 1 starts from scratch. Within a scene each step extends the step before;
-    # a new scene starts from the previous clip's last frame.
+    # Clip 1 starts from scratch. Within a scene each step extends the step before; a
+    # continued scene starts from the previous clip's last frame, a cut from nothing.
     assert omni.task(0) == "text_to_video"
     for i, p in enumerate(prompts[1:], 1):
         if p["step"] > 0:
             assert omni.task(i) == "extend"
             assert omni.bodies[i]["previous_interaction_id"] == f"int-{i}"
         else:
-            assert omni.task(i) == "image_to_video" and "previous_interaction_id" not in omni.bodies[i]
+            assert "previous_interaction_id" not in omni.bodies[i]
+            assert omni.task(i) == ("text_to_video" if p["cut"] else "image_to_video")
     scenes = {p["scene"] for p in prompts}
-    if max_scene == 30:
+    if cut:
+        assert len(prompts) == 2 and [(p["scene"], p["step"], p["cut"]) for p in prompts] == \
+            [(1, 0, False), (2, 0, True)]
+    elif max_scene == 30:
         assert scenes == {1} and len(prompts) > 1
     else:
         assert len(scenes) == len(prompts) > 1
+    # segments.json carries the planner's grouping, so --resume keeps it.
+    saved = json.loads((run / "segments.json").read_text())
+    assert [(s["scene"], s["step"], s["cut"]) for s in saved] == \
+        [(p["scene"], p["step"], p["cut"]) for p in prompts]
     for p in prompts:
         clip = run / "clips" / f"clip_{p['index']:02d}.mp4"
         assert abs(mv.media_duration(clip) - p["duration"]) < 0.1
     assert calls["checks"] == len(prompts)  # every clip was reviewed
     # Every prompt after the first was fitted to what the previous clip ends on, and
-    # the fitted prompts were saved so --resume uses them.
-    assert calls["fits"] == len(prompts) - 1
+    # the fitted prompts were saved so --resume uses them. A cut opens on a new setup,
+    # so it is not fitted to the frame before it.
+    fitted = [p for p in prompts[1:] if not p["cut"]]
+    assert calls.get("fits", 0) == len(fitted)
     assert IN_FRAME_LINE not in prompts[0]["prompt"]
-    for p in prompts[1:]:
+    for p in fitted:
         assert p["prompt"].splitlines()[1] == IN_FRAME_LINE
         assert "ACTION: works at the bench frame-left" in p["prompt"]
+    for p in prompts[1:]:
+        if p["cut"]:
+            assert IN_FRAME_LINE not in p["prompt"] and "first frame" not in p["prompt"]
+            assert "new setup of the same film" in p["prompt"].splitlines()[0]
+            assert "SETTING: the lathe corner" in p["prompt"]
+            assert "LAYOUT (as the camera sees it): Ana frame-right at the lathe" in p["prompt"]
+            assert "STYLE: photoreal" in p["prompt"] and "Wearing: apron" in p["prompt"]
     # Only a scene's first take carries the bible; extensions continue the footage.
     for p in prompts:
-        assert ("LAYOUT (as the camera sees it): Ana centre" in p["prompt"]) == (p["step"] == 0)
+        assert ("LAYOUT (as the camera sees it): Ana" in p["prompt"]) == (p["step"] == 0)
         assert p["prompt"].splitlines()[-1].startswith("AVOID: ")
     # Keyword graphics: one kept, the clip gets a layout hint, and they were burned in.
     callouts = json.loads((run / "callouts.json").read_text())

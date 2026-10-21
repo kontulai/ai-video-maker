@@ -74,7 +74,7 @@ def test_regex_backstop_when_rewrite_fails():
 
 
 def test_every_prompt_forbids_text():
-    plan = mv.VideoPlan(title="t", visual_style="s", setting="o", layout="c", lighting="l", characters=[],
+    plan = mv.VideoPlan(title="t", visual_style="s", setting="o", layout="c", lighting="l", characters=[], scenes=[],
                         shots=[_shot(1, "A sign reads 'SALE 50%'.")])
     seg = Segment(1, 0, 4, 4, "Hello there.")
     [item] = mv.assemble_prompts(_RewritingClient(fail=True), plan, [seg], lip_sync=False)
