@@ -80,8 +80,7 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene, cu
                 title="Bird feeder", visual_style="photoreal", setting="workshop", lighting="sun",
                 layout="Ana centre facing frame-right", scenes=scenes,
                 characters=[mv.Character(name="Ana", appearance="40s", wardrobe="apron")],
-                shots=[mv.Shot(index=i + 1, camera="medium", action="works", expression="smiles",
-                               speaker_on_screen=True, speaker_name="Ana", continuity="same")
+                shots=[mv.Shot(index=i + 1, camera="medium", action="works", expression="smiles", continuity="same")
                        for i in range(n)])
             return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
 

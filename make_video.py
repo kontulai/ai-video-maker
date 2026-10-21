@@ -60,7 +60,8 @@ NEGATIVE_PROMPT = (
     "objects suddenly appearing or vanishing, props morphing or multiplying, "
     "floating icons or graphics outside screens, furniture shifting position, "
     "extra people entering frame, extra fingers or limbs, distorted faces or hands, "
-    "change of face, hair, wardrobe or location, glossy plastic AI look"
+    "change of face, hair, wardrobe or location, anyone talking or mouthing words, "
+    "glossy plastic AI look"
 )
 # Keep prompts compact: video models weigh the start most and may ignore a long tail.
 MAX_PROMPT_CHARS = 3600
@@ -196,11 +197,9 @@ class Shot(BaseModel):
         "off or a very slow drift within the framing already established."))
     action: str = Field(description=(
         "What happens on screen, matched to what is said, at most 45 words."))
-    expression: str = Field(description="Facial expression and body language, at most 15 words.")
-    speaker_on_screen: bool = Field(description=(
-        "True if a visible character is speaking the line to camera in this shot; "
-        "False if the line is voice-over over B-roll."))
-    speaker_name: str = Field(description="Name of the on-screen speaker, or empty string.")
+    expression: str = Field(description=(
+        "Facial expression and body language, at most 15 words. Nobody speaks: mouths "
+        "stay closed or relaxed."))
     continuity: str = Field(description=(
         "How this shot connects to the previous and next shots (positions, props, "
         "eyeline, motion), at most 25 words."))
@@ -236,14 +235,21 @@ You are a film director and prompt engineer for Google Gemini Omni, a video
 model that can extend a video it generated. You will receive a creative brief,
 a narration script and a list of timed segments of 3 to 10 seconds. You group
 the segments into scenes and write one shot per segment. The narration is laid
-over the top.
+over the top as voice-over.
+
+NOBODY SPEAKS. The narration is voice-over: no character ever talks, talks to
+camera, mouths words, presents or explains to someone. The video model cannot
+match lips to the words, so a moving mouth looks wrong. Characters work, use
+their screens and tools, gesture, nod, point, react and look, in silence; a
+"conversation" is shown through glances, nods and handing things over. Never
+write "speaks", "says", "explains", "presents" or "talks" in a shot.
 
 SCENES. A scene is ONE unbroken take: its first segment is generated fresh and
 every later segment extends that same video, so inside a scene nothing can cut
 or jump. Omni extends a take to at most the length given in the message, so a
 scene must end at or before that (a longer one is split for you). Place the
 scene breaks where the narration moves on: a new concept or topic, the next
-item of a list, a new speaker, a change of mood, the call to action. Not every
+item of a list, another character, a change of mood, the call to action. Not every
 sentence is a new scene: a scene of one or two ideas, usually 10 to 30 seconds,
 reads well, while a break every few seconds looks like a slideshow. You choose
 how each scene after the first starts:
@@ -450,26 +456,26 @@ def take_header(duration: int, step: int, from_frame: bool = False, cut: bool = 
     return f"Single continuous {duration}-second shot from one film; no scene cuts.{start}"
 
 
-def shot_lines(shot: Shot, text: str, lip_sync: bool) -> str:
-    if shot.speaker_on_screen and lip_sync and text:
-        dialogue = f'{shot.speaker_name or "The character"} says to camera: "{text}"'
-    else:
-        dialogue = "Voice-over only; nobody on screen talks."
+DIALOGUE_LINE = ("DIALOGUE: None. Voice-over only; nobody on screen speaks, talks to camera "
+                 "or moves their lips.")
+
+
+def shot_lines(shot: Shot) -> str:
     return (f"CAMERA: {shot.camera}\n"
             f"ACTION: {shot.action}\n"
             f"EXPRESSION: {shot.expression}\n"
             f"CONTINUITY: {shot.continuity}\n"
-            f"DIALOGUE: {dialogue}\n"
+            f"{DIALOGUE_LINE}\n"
             f"{NO_TEXT_LINE}")
 
 
-def build_clip_prompt(bible: Bible, shot: Shot, seg: Segment, lip_sync: bool) -> str:
+def build_clip_prompt(bible: Bible, shot: Shot, seg: Segment) -> str:
     # Video models weigh the start of a prompt most, so the shot comes first. Only a
     # scene's first take gets the bible: an extension continues footage that already
     # shows the people and the room, and re-listing every prop and person invites the
     # model to add the ones that are not in frame.
     header = take_header(seg.duration, seg.step, from_frame=seg.scene > 1 and not seg.cut, cut=seg.cut)
-    body = f"{header}\n{shot_lines(shot, seg.text, lip_sync)}"
+    body = f"{header}\n{shot_lines(shot)}"
     if seg.step == 0:
         body += f"\n{bible_text(bible)}"
     return f"{body}\nAVOID: {NEGATIVE_PROMPT}."
@@ -506,7 +512,7 @@ def condense_bible(client, bible: Bible, max_chars: int) -> Bible:
     return Bible.model_validate(out.model_dump())
 
 
-def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync: bool,
+def assemble_prompts(client, plan: VideoPlan, segments: list[Segment],
                      max_chars: int = MAX_PROMPT_CHARS, attempts: int = 2) -> list[dict]:
     shots = {s.index: s for s in plan.shots}
     if len(shots) != len(segments):
@@ -520,7 +526,7 @@ def assemble_prompts(client, plan: VideoPlan, segments: list[Segment], lip_sync:
     scenes = {sp.first_segment: sp for sp in plan.scenes}
     for attempt in range(attempts + 1):
         bibles = [scene_bible(bible, seg, scenes) for seg, _ in pairs]
-        prompts = [build_clip_prompt(b, shot, seg, lip_sync) for b, (seg, shot) in zip(bibles, pairs)]
+        prompts = [build_clip_prompt(b, shot, seg) for b, (seg, shot) in zip(bibles, pairs)]
         longest = max(len(p) for p in prompts)
         if longest <= max_chars or attempt == attempts:
             break
@@ -561,7 +567,7 @@ def scenes_from_plan(plan: VideoPlan, segments: list[Segment], max_scene: int) -
 
 
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
-                 lip_sync: bool, max_scene: int = MAX_SCENE_SECONDS) -> list[dict]:
+                 max_scene: int = MAX_SCENE_SECONDS) -> list[dict]:
     """Have Gemini write the production bible, group the steps into scenes and write one
     shot per step; returns one item per step with the prompt and the scene assignment."""
     prompts_path = run / "prompts.json"
@@ -601,7 +607,7 @@ SEGMENTS ({len(segments)} segments, {segments[-1].end}s in all; group them into 
     (run / "plan.json").write_text(plan.model_dump_json(indent=2))
 
     segments = scenes_from_plan(plan, segments, max_scene)
-    out = assemble_prompts(client, plan, segments, lip_sync)
+    out = assemble_prompts(client, plan, segments)
     longest = max(len(o["prompt"]) for o in out)
     log(f"Built {len(out)} prompts (longest {longest} chars, limit ~{MAX_PROMPT_CHARS}).")
     prompts_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
@@ -876,8 +882,7 @@ def fit_to_footage(client, item: dict, in_frame: str) -> str:
     fields = {k: v for k, v in (ln.split(": ", 1) for ln in lines if ": " in ln) if k in _SHOT_LINES}
     if "ACTION" in fields:
         shot = Shot(index=item["index"], camera=fields.get("CAMERA", ""), action=fields["ACTION"],
-                    expression=fields.get("EXPRESSION", ""), speaker_on_screen=False,
-                    speaker_name="", continuity=fields.get("CONTINUITY", ""))
+                    expression=fields.get("EXPRESSION", ""), continuity=fields.get("CONTINUITY", ""))
         try:
             resp = client.models.generate_content(
                 model=PROMPT_MODEL,
@@ -1158,8 +1163,6 @@ def main() -> None:
     ap.add_argument("--max-scene", type=int, default=MAX_SCENE_SECONDS, metavar="SECONDS",
                     help="Longest single take before a new scene has to start "
                          f"(10-{MAX_SCENE_SECONDS}, default {MAX_SCENE_SECONDS}).")
-    ap.add_argument("--no-lip-sync", action="store_true",
-                    help="Don't put the spoken line in the prompt (on-screen mouths won't move with the words).")
     ap.add_argument("--callouts", default="medium", choices=["off", "low", "medium", "high"],
                     help="How often keyword graphics pop up on screen (default: medium).")
     ap.add_argument("--text-retries", type=int, default=2, metavar="N",
@@ -1201,7 +1204,7 @@ def main() -> None:
         segments = plan_segments(words_from_alignment(alignment), duration, args.max_scene)
     seg_path.write_text(json.dumps([s.to_dict() for s in segments], indent=2))
     log(f"{len(segments)} steps, {segments[-1].end}s for {duration:.1f}s of audio.")
-    items = plan_prompts(scene, talk, segments, run, not args.no_lip_sync, args.max_scene)
+    items = plan_prompts(scene, talk, segments, run, args.max_scene)
     if [(i["index"], i["duration"]) for i in items] != [(s.index, s.duration) for s in segments]:
         sys.exit(f"{run / 'prompts.json'} was planned with different segments (an older version of "
                  "this script?). Start a new run, or delete prompts.json and callouts.json.")

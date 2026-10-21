@@ -118,22 +118,24 @@ def _plan(appearance="APPEAR", n_shots=1):
     return mv.VideoPlan(scenes=[],
         title="t", visual_style="STYLE", setting="SETTING", layout="LAY", lighting="LIGHT",
         characters=[mv.Character(name="Ana", appearance=appearance, wardrobe="WARD")],
-        shots=[mv.Shot(index=i + 1, camera="CAM", action="ACT", expression="EXP",
-                       speaker_on_screen=True, speaker_name="Ana", continuity="CONT")
+        shots=[mv.Shot(index=i + 1, camera="CAM", action="ACT", expression="EXP", continuity="CONT")
                for i in range(n_shots)],
     )
 
 
-def test_build_prompt_repeats_bible_and_dialogue():
+def test_build_prompt_repeats_bible_and_keeps_everyone_silent():
     plan = _plan()
     seg = plan_segments(words_from_alignment(fake_alignment("Hi there.")), 1.0)[0]
-    p = mv.build_clip_prompt(plan, plan.shots[0], seg, lip_sync=True)
-    for token in ("STYLE", "SETTING", "LAY", "LIGHT", "APPEAR", "WARD", "CAM", "ACT", "CONT", '"Hi there."'):
+    p = mv.build_clip_prompt(plan, plan.shots[0], seg)
+    for token in ("STYLE", "SETTING", "LAY", "LIGHT", "APPEAR", "WARD", "CAM", "ACT", "CONT"):
         assert token in p
     assert p.index("CAMERA") < p.index("SETTING"), "shot details should come before the bible"
     assert p.splitlines()[-1].startswith("AVOID: "), "the avoid list goes last"
-    p2 = mv.build_clip_prompt(plan, plan.shots[0], seg, lip_sync=False)
-    assert '"Hi there."' not in p2
+    # The narration is voice-over: the spoken words never reach the video model, and
+    # every prompt says that nobody on screen speaks.
+    assert "Hi there" not in p
+    assert "DIALOGUE: None. Voice-over only; nobody on screen speaks" in p
+    assert "talking or mouthing words" in p.splitlines()[-1]
 
 
 def test_planner_regroups_steps_into_scenes():
@@ -159,7 +161,7 @@ def test_prompts_say_new_take_or_extension_and_ban_slop():
     ext = mv.Segment(2, 6, 14, 8, "b", scene=1, step=1)
     new_scene = mv.Segment(3, 14, 20, 6, "c", scene=2, step=0)
     cut = mv.Segment(3, 14, 20, 6, "c", scene=2, step=0, cut=True)
-    p1, p2, p3, p4 = (mv.build_clip_prompt(plan, plan.shots[0], s, lip_sync=False)
+    p1, p2, p3, p4 = (mv.build_clip_prompt(plan, plan.shots[0], s)
                       for s in (first, ext, new_scene, cut))
     assert p1.startswith("Single continuous 6-second shot") and "first frame" not in p1
     assert p2.startswith("Extend this video by 8 seconds")
@@ -201,7 +203,7 @@ def test_long_prompts_are_condensed_to_fit():
     plan = _plan(appearance="very detailed " * 400, n_shots=2)
     segs = plan_segments(words_from_alignment(fake_alignment(SCRIPT)), 18.4)[:2]
     client = _CondensingClient()
-    items = mv.assemble_prompts(client, plan, segs, lip_sync=True)
+    items = mv.assemble_prompts(client, plan, segs)
     assert client.calls == 1
     assert all(len(i["prompt"]) <= mv.MAX_PROMPT_CHARS for i in items)
     # The scene's first take has the condensed bible; the extension needs none but
@@ -220,7 +222,7 @@ def test_cut_scene_gets_its_own_setting_and_layout():
                    mv.ScenePlan(first_segment=3, cut=False, setting="ignored: not a cut")]
     segs = [mv.Segment(1, 0, 5, 5, "a"), mv.Segment(2, 5, 10, 5, "b", scene=2, step=0, cut=True),
             mv.Segment(3, 10, 15, 5, "c", scene=3, step=0)]
-    items = mv.assemble_prompts(_CondensingClient(), plan, segs, lip_sync=False)
+    items = mv.assemble_prompts(_CondensingClient(), plan, segs)
     assert "SETTING: SETTING" in items[0]["prompt"] and "LAY" in items[0]["prompt"]
     assert "SETTING: the lathe corner" in items[1]["prompt"]
     assert "LAYOUT (as the camera sees it): Ana frame-right at the lathe" in items[1]["prompt"]
@@ -235,7 +237,7 @@ def test_short_prompts_are_left_alone():
     plan = _plan(n_shots=1)
     segs = plan_segments(words_from_alignment(fake_alignment("Hi there.")), 1.0)
     client = _CondensingClient()
-    mv.assemble_prompts(client, plan, segs, lip_sync=True)
+    mv.assemble_prompts(client, plan, segs)
     assert client.calls == 0
 
 

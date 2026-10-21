@@ -39,8 +39,7 @@ def test_keeps_possessives_and_plain_emphasis():
 
 
 def _shot(i, action):
-    return mv.Shot(index=i, camera="Close-up", action=action, expression="calm",
-                   speaker_on_screen=False, speaker_name="", continuity="same")
+    return mv.Shot(index=i, camera="Close-up", action=action, expression="calm", continuity="same")
 
 
 class _RewritingClient:
@@ -77,7 +76,7 @@ def test_every_prompt_forbids_text():
     plan = mv.VideoPlan(title="t", visual_style="s", setting="o", layout="c", lighting="l", characters=[], scenes=[],
                         shots=[_shot(1, "A sign reads 'SALE 50%'.")])
     seg = Segment(1, 0, 4, 4, "Hello there.")
-    [item] = mv.assemble_prompts(_RewritingClient(fail=True), plan, [seg], lip_sync=False)
+    [item] = mv.assemble_prompts(_RewritingClient(fail=True), plan, [seg])
     assert mv.NO_TEXT_LINE in item["prompt"]
     assert "SALE" not in item["prompt"]
     assert "readable text" in mv.NEGATIVE_PROMPT
