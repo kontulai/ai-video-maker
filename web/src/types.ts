@@ -73,7 +73,8 @@ export interface Project {
 // -- scene plan ------------------------------------------------------------------------------
 export interface Character {
   name: string;
-  look: string;
+  appearance: string;
+  wardrobe: string;
 }
 
 export interface Bible {
@@ -93,15 +94,17 @@ export interface Shot {
 }
 
 export interface ScenePlan {
-  first_index: number;
+  first_segment: number;
   cut: boolean;
   setting: string;
   layout: string;
+  reason: string;
 }
 
 export interface VideoPlan extends Bible {
-  shots: Shot[];
+  title: string;
   scenes: ScenePlan[];
+  shots: Shot[];
 }
 
 export interface Segment {
