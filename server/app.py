@@ -8,7 +8,9 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
+import callouts as fx
 import make_video as mv
+from segmentation import words_from_alignment
 from . import phases, projects
 from .jobs import Job, JobBusy, JobRunner
 from .projects import Project, Settings
@@ -36,6 +38,11 @@ def _summaries(p: Project) -> dict[str, str]:
         done = sum(v.status != "missing" for v in views)
         if done or p.video.version:
             out["video"] = f"{done} of {len(views)} scenes"
+    if p.overlays.version:
+        n = len(phases.load_overlays(p)[1])
+        out["overlays"] = f"{n} overlay{'s' if n != 1 else ''}"
+    if p.final.version:
+        out["final"] = "rendered"
     return out
 
 
@@ -236,6 +243,69 @@ def read_video(project_id: str) -> dict:
     p = get_project(project_id)
     return {"scenes": [v.model_dump() for v in phases.scene_status(p)],
             "rough_cut": (projects.folder(p.id) / "rough_cut.mp4").exists()}
+
+
+# -- overlays and renders -------------------------------------------------------------------------------
+class OverlaysBody(BaseModel):
+    accent_color: str
+    overlays: list[phases.Overlay]
+
+
+class SuggestBody(BaseModel):
+    replace_edited: bool = False
+
+
+def overlays_view(p: Project) -> dict:
+    run = projects.folder(p.id)
+    accent, overlays = phases.load_overlays(p)
+    words = words_from_alignment(phases.read_json(run / "alignment.json", {}))
+    rough_cut = run / "rough_cut.mp4"
+    return {
+        "accent_color": accent or fx.DEFAULT_ACCENT,
+        "overlays": [o.model_dump() for o in overlays],
+        "words": [{"text": w.text, "start": w.start, "end": w.end} for w in words],
+        "segments": [s.to_dict() for s in phases.load_segments(p)],
+        "duration": mv.media_duration(rough_cut) if rough_cut.exists() else 0.0,
+    }
+
+
+def need_rough_cut(p: Project) -> None:
+    if not (projects.folder(p.id) / "rough_cut.mp4").exists():
+        raise HTTPException(400, "Generate the video first")
+
+
+@app.get("/api/projects/{project_id}/overlays")
+def read_overlays(project_id: str) -> dict:
+    return overlays_view(get_project(project_id))
+
+
+@app.put("/api/projects/{project_id}/overlays")
+def put_overlays(project_id: str, body: OverlaysBody) -> dict:
+    p = get_project(project_id)
+    phases.save_overlays(p, body.accent_color, body.overlays)
+    return overlays_view(p)
+
+
+@app.post("/api/projects/{project_id}/run/overlays", status_code=202)
+def run_overlays(project_id: str, body: SuggestBody | None = None) -> Job:
+    p = get_project(project_id)
+    need_rough_cut(p)
+    replace = bool(body and body.replace_edited)
+    return start_job(p, "overlays", lambda p, log: phases.suggest_overlays(p, log, replace))
+
+
+@app.post("/api/projects/{project_id}/run/preview-render", status_code=202)
+def run_preview_render(project_id: str) -> Job:
+    p = get_project(project_id)
+    need_rough_cut(p)
+    return start_job(p, "overlays", lambda p, log: phases.render(p, log, "overlay_preview.mp4"))
+
+
+@app.post("/api/projects/{project_id}/run/final", status_code=202)
+def run_final(project_id: str) -> Job:
+    p = get_project(project_id)
+    need_rough_cut(p)
+    return start_job(p, "final", lambda p, log: phases.render(p, log, "final.mp4"))
 
 
 # -- files ----------------------------------------------------------------------------------------

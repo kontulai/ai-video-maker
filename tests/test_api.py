@@ -438,3 +438,123 @@ def test_regenerated_scene_refits_prompt(client, tmp_path, monkeypatch):
     item = next(it for it in client.get(f"/api/projects/{pid}/plan").json()["items"] if it["index"] == first_of_2)
     assert item["prompt"].splitlines()[1] == "IN FRAME NOW: Ana at the window"
     assert "fitted" in item["prompt"] and gem.fits == fits + len(video_view(client, pid)["scenes"][1]["steps"])
+
+
+# -- Task 7: overlays and renders -----------------------------------------------------------------
+import subprocess  # noqa: E402
+import callouts as fx  # noqa: E402
+
+
+def suggest_callouts(contents):
+    """Answer the overlay planner with one 'swipe' per segment anchored on its first two words."""
+    chosen = []
+    for m in re.finditer(r'Segment (\d+) \(.*?\)\. Shot: .*\n  Narration: "(.*?)"', contents):
+        idx, words = int(m.group(1)), m.group(2).split()
+        chosen.append(fx.Callout(segment_index=idx, text=" ".join(words[:2]).upper(),
+                                 anchor=" ".join(words[:2]), style="swipe", position="top-right"))
+    return fx.CalloutPlan(accent_color="#123456", callouts=chosen)
+
+
+def overlay_project(client, tmp_path, monkeypatch):
+    """A project with a rough cut, whose Gemini answers overlay suggestions."""
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    gem.callouts = suggest_callouts
+    return pid, gem
+
+
+def overlays_view(client, pid):
+    return client.get(f"/api/projects/{pid}/overlays").json()
+
+
+def run_phase(client, pid, phase, body=None):
+    r = client.post(f"/api/projects/{pid}/run/{phase}", json=body or {})
+    assert r.status_code == 202, r.text
+    job = wait_job(client, pid)
+    assert job["status"] == "done", job
+    return job
+
+
+def overlay(**kw):
+    base = {"id": kw.pop("id", "x"), "text": "TEXT", "style": "slam", "position": "top-left",
+            "list_name": "", "start": 1.0, "end": 4.0, "anchor": "", "segment_index": None, "edited": True}
+    return {**base, **kw}
+
+
+def audio_streams(path: Path) -> int:
+    out = subprocess.run([mv.FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    return len(re.findall(r"Stream #\d+:\d+.*?: Audio", out))
+
+
+def test_suggest_overlays_times_and_keeps_edited(client, tmp_path, monkeypatch):
+    bare = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    assert client.post(f"/api/projects/{bare}/run/overlays", json={"replace_edited": False}).status_code == 400
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    run_phase(client, pid, "overlays", {"replace_edited": False})
+    data = overlays_view(client, pid)
+    ovs = data["overlays"]
+    assert data["accent_color"] == "#123456" and len(ovs) >= 2
+    assert all(o["id"] and o["start"] < o["end"] and o["edited"] is False and o["anchor"] for o in ovs)
+    assert ovs[0]["text"] == "WELCOME TO" and abs(ovs[0]["start"] - (0.2 - fx.LEAD_IN)) < 0.05
+    assert data["duration"] > 30 and data["words"][0]["text"] == "Welcome" and len(data["segments"]) >= 4
+    proj = client.get(f"/api/projects/{pid}").json()
+    assert proj["overlays"]["version"] == 1 and proj["phases"]["overlays"]["status"] == "ready"
+    assert proj["phases"]["overlays"]["summary"] == f"{len(ovs)} overlays"
+    # the user edits one and changes the accent; new suggestions keep both until asked to replace
+    ovs[0] = {**ovs[0], "text": "MY EDIT", "edited": True}
+    r = client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#ABCDEF", "overlays": ovs})
+    assert r.status_code == 200 and r.json()["overlays"][0]["text"] == "MY EDIT"
+    run_phase(client, pid, "overlays", {"replace_edited": False})
+    data = overlays_view(client, pid)
+    texts = [o["text"] for o in data["overlays"]]
+    assert "MY EDIT" in texts and texts.count("WELCOME TO") == 1 and data["accent_color"] == "#ABCDEF"
+    assert sum(not o["edited"] for o in data["overlays"]) == len(ovs)
+    run_phase(client, pid, "overlays", {"replace_edited": True})
+    data = overlays_view(client, pid)
+    assert "MY EDIT" not in [o["text"] for o in data["overlays"]] and data["accent_color"] == "#123456"
+    assert client.get(f"/api/projects/{pid}").json()["overlays"]["version"] == 4
+    # density off: no model call, no overlays
+    calls = len(gem.seen)
+    assert client.patch(f"/api/projects/{pid}", json={"settings": {"density": "off"}}).status_code == 200
+    run_phase(client, pid, "overlays", {"replace_edited": True})
+    assert overlays_view(client, pid)["overlays"] == [] and len(gem.seen) == calls
+
+
+def test_render_preview_burns_exact_times(client, tmp_path, monkeypatch):
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    ovs = [overlay(id="a", text="FIRST", style="slam", position="top-left", start=1.0, end=8.0),
+           overlay(id="b", text="SECOND", style="swipe", position="top-left", start=4.0, end=10.0)]
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": ovs}).status_code == 200
+    assert client.get(f"/api/projects/{pid}").json()["files"]["preview_render"] is False
+    run_phase(client, pid, "preview-render")
+    ass = (projects.folder(pid) / "callouts.ass").read_text()
+    lines = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
+    first = [l for l in lines if "FIRST" in l]
+    second = [l for l in lines if "SECOND" in l]
+    assert first and second  # both drawn although they overlap in time and place
+    assert min(l.split(",")[1] for l in first) == fx._ass_time(1.0)
+    assert min(l.split(",")[1] for l in second) == fx._ass_time(4.0)
+    assert max(l.split(",")[2] for l in first) == fx._ass_time(8.0)
+    assert "00FF00" in ass.upper()
+    proj = client.get(f"/api/projects/{pid}").json()
+    assert proj["files"]["preview_render"] and proj["final"]["version"] == 0
+    assert client.get(f"/api/projects/{pid}/files/overlay_preview.mp4").status_code == 200
+
+
+def test_final_render_has_voice_and_bumps_final(client, tmp_path, monkeypatch):
+    bare = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    assert client.post(f"/api/projects/{bare}/run/final").status_code == 400
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    assert client.put(f"/api/projects/{pid}/overlays",
+                      json={"accent_color": "#FFC400", "overlays": [overlay(id="a", text="HELLO")]}).status_code == 200
+    run_phase(client, pid, "final")
+    final = projects.folder(pid) / "final.mp4"
+    assert final.exists() and audio_streams(final) == 1
+    assert "HELLO" in (projects.folder(pid) / "callouts.ass").read_text()
+    proj = client.get(f"/api/projects/{pid}").json()
+    assert proj["final"]["version"] == 1 and proj["phases"]["final"]["status"] == "ready"
+    assert proj["phases"]["final"]["summary"] == "rendered" and proj["files"]["final"]
+    # no overlays at all still renders, with the voice
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#FFC400", "overlays": []}).status_code == 200
+    run_phase(client, pid, "final")
+    assert audio_streams(final) == 1 and client.get(f"/api/projects/{pid}").json()["final"]["version"] == 2

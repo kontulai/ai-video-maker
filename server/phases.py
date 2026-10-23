@@ -297,3 +297,114 @@ def _record_scenes(project_id: str, targets: list[int], log) -> None:
         log("Rough cut saved: rough_cut.mp4")
         projects.bump(fresh, "video")
     projects.save(fresh)
+
+
+# -- phases 5 and 6: overlays and renders ------------------------------------------------------------
+import uuid  # noqa: E402
+
+import callouts as fx  # noqa: E402
+
+
+class Overlay(BaseModel):
+    """One keyword graphic, with the exact seconds it is drawn. The timing code gives a
+    suggestion its first start and end; after that the times in the file are the truth."""
+    id: str
+    text: str
+    style: Literal["slam", "swipe", "reveal", "bullet"]
+    position: Literal["top-left", "top-right", "bottom-left", "bottom-right", "center"]
+    list_name: str = ""
+    start: float
+    end: float
+    anchor: str = ""
+    segment_index: int | None = None
+    edited: bool = False
+
+
+def callouts_path(p: Project) -> Path:
+    return projects.folder(p.id) / "callouts.json"
+
+
+def load_overlays(p: Project) -> tuple[str | None, list[Overlay]]:
+    """The accent colour (None before the first suggestion or save) and the overlays."""
+    data = read_json(callouts_path(p), {})
+    return data.get("accent_color"), [Overlay.model_validate(o) for o in data.get("overlays", [])]
+
+
+def _write_overlays(p: Project, accent: str, overlays: list[Overlay], raw: list[dict] | None = None) -> None:
+    data = read_json(callouts_path(p), {})
+    data["accent_color"] = accent
+    if raw is not None:
+        data["callouts"] = raw
+    data["overlays"] = [o.model_dump() for o in overlays]
+    write_json(callouts_path(p), data)
+
+
+def suggest_overlays(p: Project, log, replace_edited: bool) -> None:
+    """Ask Gemini for keyword graphics over the rough cut's narration and shots, and time them
+    to the spoken words. Overlays the user edited stay unless `replace_edited`; so does the
+    user's accent colour. Density 'off' leaves no overlays and makes no model call."""
+    run = projects.folder(p.id)
+    rough_cut = run / "rough_cut.mp4"
+    if not rough_cut.exists():
+        raise RuntimeError("Generate the video first.")
+    old_accent, old = load_overlays(p)
+    kept = [] if replace_edited else [o for o in old if o.edited]
+    density = p.settings.density
+    if density == "off":
+        log("Overlay density is off: no graphics suggested.")
+        _write_overlays(p, old_accent or fx.DEFAULT_ACCENT, kept, raw=[])
+        _commit(p.id, "overlays")
+        return
+    from google import genai
+
+    segments = load_segments(p)
+    plan = read_json(run / "plan.json", {})
+    shots = {s["index"]: f"{s.get('camera', '')} {s.get('action', '')}".strip() for s in plan.get("shots", [])}
+    client = genai.Client(api_key=mv.require_env("GEMINI_API_KEY"))
+    log(f"Choosing on-screen keywords with {mv.PROMPT_MODEL} (density: {density})...")
+    accent, chosen = fx.plan_callouts(client, mv.PROMPT_MODEL, segments, shots, plan.get("visual_style", ""), density)
+    words = words_from_alignment(read_json(run / "alignment.json", {}))
+    timed = fx.time_callouts(chosen, words, segments, mv.media_duration(rough_cut))
+    fresh = []
+    for t in timed:
+        src = next((c for c in chosen if c.text == t.text), None)
+        fresh.append(Overlay(id=uuid.uuid4().hex[:8], text=t.text, style=t.style, position=t.position,
+                             list_name=t.list_name, start=round(t.start, 3), end=round(t.end, 3),
+                             anchor=src.anchor if src else "", segment_index=src.segment_index if src else None))
+    accent = old_accent if (kept and old_accent) else accent
+    _write_overlays(p, accent, sorted(kept + fresh, key=lambda o: o.start), raw=[c.model_dump() for c in chosen])
+    log(f"Suggested {len(fresh)} keyword graphics" + (f", kept {len(kept)} edited." if kept else "."))
+    _commit(p.id, "overlays")
+
+
+def save_overlays(p: Project, accent_color: str, overlays: list[Overlay]) -> None:
+    """Write the overlays as the editor sends them (the client sets `edited`)."""
+    _write_overlays(p, accent_color, overlays)
+    projects.bump(p, "overlays")
+    projects.save(p)
+
+
+def render(p: Project, log, name: str) -> Path:
+    """Burn the overlays onto the rough cut and lay the voice over it. `overlay_preview.mp4`
+    is the phase 5 check; `final.mp4` is the deliverable and bumps the final phase."""
+    run = projects.folder(p.id)
+    rough_cut, voice = run / "rough_cut.mp4", run / "voice.mp3"
+    if not rough_cut.exists():
+        raise RuntimeError("Generate the video first.")
+    if not voice.exists():
+        raise RuntimeError("Generate the voice track first.")
+    accent, overlays = load_overlays(p)
+    ass_path = None
+    if overlays:
+        timed = fx.stack_bullets([fx.TimedCallout(o.text, o.style, o.position, o.start, o.end, list_name=o.list_name)
+                                  for o in overlays])
+        width, height = mv.video_size(rough_cut)
+        ass_path = run / "callouts.ass"
+        ass_path.write_text(fx.write_ass(timed, width, height, accent or fx.DEFAULT_ACCENT,
+                                         mv.CALLOUT_FONT, mv.CALLOUT_FONT_HEAVY))
+        log(f"Drawing {len(overlays)} keyword graphics.")
+    out = mv.add_voice(rough_cut, voice, run, overlay=ass_path, name=name)
+    log(f"Saved {name}")
+    if name == "final.mp4":
+        _commit(p.id, "final")
+    return out
