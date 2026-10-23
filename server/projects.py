@@ -53,6 +53,7 @@ class Project(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     description: str = ""
     talk_track: str = ""
+    voice_seconds: float | None = None
     previews: list[str] = Field(default_factory=list)
     current_preview: str | None = None
     setting: PhaseOutput = Field(default_factory=PhaseOutput)
