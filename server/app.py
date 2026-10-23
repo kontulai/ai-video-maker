@@ -32,6 +32,10 @@ def _summaries(p: Project) -> dict[str, str]:
         items = phases.load_items(p)
         n = max((int(it.get("scene", 1)) for it in items), default=0)
         out["plan"] = f"{n} scene{'s' if n != 1 else ''}"
+        views = phases.scene_status(p)
+        done = sum(v.status != "missing" for v in views)
+        if done or p.video.version:
+            out["video"] = f"{done} of {len(views)} scenes"
     return out
 
 
@@ -148,6 +152,22 @@ def run_plan(project_id: str) -> Job:
     return start_job(p, "plan", phases.generate_plan)
 
 
+class VideoBody(BaseModel):
+    scenes: list[int] | None = None
+
+
+@app.post("/api/projects/{project_id}/run/video", status_code=202)
+def run_video(project_id: str, body: VideoBody | None = None) -> Job:
+    p = get_project(project_id)
+    views = phases.scene_status(p)
+    if not views:
+        raise HTTPException(400, "Plan the scenes first")
+    scenes = body.scenes if body and body.scenes else None
+    if scenes and set(scenes) - {v.number for v in views}:
+        raise HTTPException(400, "No such scene")
+    return start_job(p, "video", lambda p, log: phases.generate_video(p, log, scenes), scenes=scenes)
+
+
 @app.get("/api/projects/{project_id}/job")
 def read_job(project_id: str) -> Job | None:
     get_project(project_id)
@@ -209,6 +229,13 @@ def put_prompt(project_id: str, index: int, body: PromptBody) -> dict:
     except KeyError:
         raise HTTPException(404, "No such step")
     return plan_view(p)
+
+
+@app.get("/api/projects/{project_id}/video")
+def read_video(project_id: str) -> dict:
+    p = get_project(project_id)
+    return {"scenes": [v.model_dump() for v in phases.scene_status(p)],
+            "rough_cut": (projects.folder(p.id) / "rough_cut.mp4").exists()}
 
 
 # -- files ----------------------------------------------------------------------------------------

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import make_video as mv
 from segmentation import Segment
-from fake_omni import FakeInteractions
+from fakes import FakeInteractions
 
 # Real examples from a run where the video model rendered "EXTERNAL SHARE BOLCKED".
 CASES = {

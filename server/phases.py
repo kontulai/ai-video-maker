@@ -174,3 +174,126 @@ def pin_prompt(p: Project, index: int, prompt: str) -> list[dict]:
 
 def pinned_prompts(p: Project) -> dict[int, str]:
     return {it["index"]: it["prompt"] for it in load_items(p) if it.get("pinned_for")}
+
+
+# -- phase 4: the video, scene by scene --------------------------------------------------------------
+from typing import Literal  # noqa: E402
+
+from pydantic import BaseModel  # noqa: E402
+
+from .projects import SceneState  # noqa: E402
+
+
+class SceneStep(BaseModel):
+    index: int
+    duration: int
+    clip: str | None  # path inside the project folder, when the clip exists
+
+
+class SceneView(BaseModel):
+    number: int
+    start: float
+    end: float
+    cut: bool
+    steps: list[SceneStep]
+    status: Literal["missing", "stale", "older_footage", "ready"]
+
+
+def clip_name(index: int) -> str:
+    return f"clips/clip_{index:02d}.mp4"
+
+
+def scene_status(p: Project) -> list[SceneView]:
+    """Every planned scene with its clips and whether it needs (re)generating: missing
+    clips, prompts changed since it was made, or (for a continued scene) the scene
+    before it was remade since."""
+    run = projects.folder(p.id)
+    by_scene: dict[int, list[dict]] = {}
+    for it in load_items(p):
+        by_scene.setdefault(int(it.get("scene", 1)), []).append(it)
+    prints = scene_fingerprints(p)
+    views = []
+    for n in sorted(by_scene):
+        group = by_scene[n]
+        steps = [SceneStep(index=it["index"], duration=it["duration"],
+                           clip=clip_name(it["index"]) if (run / clip_name(it["index"])).exists() else None)
+                 for it in group]
+        cut = bool(group[0].get("cut"))
+        state, before = p.scenes.get(str(n)), p.scenes.get(str(n - 1))
+        if any(s.clip is None for s in steps):
+            status = "missing"
+        elif state is None or state.fingerprint != prints.get(n):
+            status = "stale"
+        elif n > 1 and not cut and state.previous_generation != (before.generation if before else None):
+            status = "older_footage"
+        else:
+            status = "ready"
+        views.append(SceneView(number=n, start=group[0]["start"], end=group[-1]["end"], cut=cut,
+                               steps=steps, status=status))
+    return views
+
+
+def generate_video(p: Project, log, scenes: list[int] | None = None) -> None:
+    """Make the clips of the given scenes, or of every scene that is not ready, then
+    glue all clips into the rough cut. A remade scene starts again from the frame
+    before it and its prompts are fitted to that footage afresh."""
+    run = projects.folder(p.id)
+    items = load_items(p)
+    if not items:
+        raise RuntimeError("Plan the scenes first.")
+    views = scene_status(p)
+    targets = sorted(set(scenes)) if scenes else [v.number for v in views if v.status != "ready"]
+    unknown = set(targets) - {v.number for v in views}
+    if unknown:
+        raise ValueError(f"No such scene: {sorted(unknown)}")
+    clip_dir = run / "clips"
+    clip_dir.mkdir(exist_ok=True)
+    state_path = clip_dir / "steps.json"
+    state = read_json(state_path, {})
+    pinned: dict[int, str] = {}
+    for pos, it in enumerate(items):
+        if int(it.get("scene", 1)) not in targets:
+            continue
+        _unlink(run / clip_name(it["index"]), clip_dir / f"lastframe_{pos:02d}.png")
+        state.pop(str(it["index"]), None)
+        if it.get("pinned_for"):
+            pinned[it["index"]] = it["prompt"]  # sent as written; fitting is not saved over it
+        elif it.get("source_prompt"):
+            it["prompt"] = it["source_prompt"]  # drop the old fit so the prompt is fitted again
+    write_json(state_path, state)
+    write_json(run / "prompts.json", items)
+    if targets:
+        log(f"Generating scene(s) {', '.join(map(str, targets))}...")
+    else:
+        log("Every scene is up to date.")
+    try:
+        mv.generate_clips(items, run, p.settings.aspect, p.settings.resolution, start_image=preview_path(p),
+                          text_retries=p.settings.text_retries, fit=True)
+    finally:
+        if pinned:
+            saved = load_items(p)
+            for it in saved:
+                if it["index"] in pinned:
+                    it["prompt"] = pinned[it["index"]]
+            write_json(run / "prompts.json", saved)
+        _record_scenes(p.id, targets, log)
+
+
+def _record_scenes(project_id: str, targets: list[int], log) -> None:
+    """Remember what each remade scene was made from, and glue the rough cut when every
+    clip exists. Works on a fresh copy so edits made during the job are kept."""
+    fresh = projects.load(project_id)
+    run = projects.folder(project_id)
+    prints = scene_fingerprints(fresh)
+    views = scene_status(fresh)
+    for v in views:
+        if v.number in targets and all(s.clip for s in v.steps):
+            old, before = fresh.scenes.get(str(v.number)), fresh.scenes.get(str(v.number - 1))
+            fresh.scenes[str(v.number)] = SceneState(
+                fingerprint=prints[v.number], generation=(old.generation + 1 if old else 1),
+                previous_generation=before.generation if before else None)
+    if views and all(s.clip for v in views for s in v.steps):
+        mv.concatenate([run / s.clip for v in views for s in v.steps], run, name="rough_cut.mp4")
+        log("Rough cut saved: rough_cut.mp4")
+        projects.bump(fresh, "video")
+    projects.save(fresh)

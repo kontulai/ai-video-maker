@@ -12,7 +12,7 @@ import google.genai
 import pytest
 import callouts as fx
 import make_video as mv
-from fake_omni import FakeInteractions
+from fakes import FakeInteractions
 from test_pipeline import SCRIPT, fake_alignment
 
 IN_FRAME_LINE = "IN FRAME NOW: Ana centre, bench frame-left"

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import make_video as mv
 from server import app as server_app
 from server import projects
+from fakes import FakeGemini, FakeInteractions
 from test_pipeline import fake_alignment
 
 
@@ -196,31 +197,30 @@ def make_voice(client, tmp_path, monkeypatch, pid, text=SCRIPT):
     assert wait_job(client, pid)["status"] == "done"
 
 
-def fake_planner(seen):
-    """A Gemini that answers the planner with one shot per segment and two scenes."""
-    class FakeClient:
-        def __init__(self, **kw):
-            self.models = self
-
-        def generate_content(self, model, contents, config):
-            seen.append(contents)
-            text = contents if isinstance(contents, str) else contents[-1]
-            n = int(re.search(r"SEGMENTS \((\d+) segments", text).group(1))
-            shots = [mv.Shot(index=i, camera=f"camera {i}", action=f"action {i}", expression="calm",
-                             continuity=f"link {i}") for i in range(1, n + 1)]
-            scenes = [mv.ScenePlan(first_segment=1, cut=True)]
-            if n > 1:
-                scenes.append(mv.ScenePlan(first_segment=n // 2 + 1, cut=True, setting="The desk, close",
-                                           layout="Monitor frame-left, Ana centre", reason="next point"))
-            plan = mv.VideoPlan(title="Claims", visual_style="photoreal", setting="An office",
-                                lighting="soft window light", layout="Ana centre, monitor frame-right",
-                                characters=[mv.Character(name="Ana", appearance="dark hair", wardrobe="navy blazer")],
-                                scenes=scenes, shots=shots)
-            return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
-    return FakeClient
+def two_scene_plan(cut: bool = True):
+    """A planner answer with one shot per segment and two scenes; the second one cuts to
+    a new setup or continues the first."""
+    def build(contents):
+        text = contents if isinstance(contents, str) else contents[-1]
+        n = int(re.search(r"SEGMENTS \((\d+) segments", text).group(1))
+        shots = [mv.Shot(index=i, camera=f"camera {i}", action=f"action {i}", expression="calm",
+                         continuity=f"link {i}") for i in range(1, n + 1)]
+        scenes = [mv.ScenePlan(first_segment=1, cut=True)]
+        if n > 1:
+            scenes.append(mv.ScenePlan(first_segment=n // 2 + 1, cut=cut, setting="The desk, close" if cut else "",
+                                       layout="Monitor frame-left, Ana centre" if cut else "", reason="next point"))
+        return mv.VideoPlan(title="Claims", visual_style="photoreal", setting="An office",
+                            lighting="soft window light", layout="Ana centre, monitor frame-right",
+                            characters=[mv.Character(name="Ana", appearance="dark hair", wardrobe="navy blazer")],
+                            scenes=scenes, shots=shots)
+    return build
 
 
-def planned_project(client, tmp_path, monkeypatch, with_preview=True):
+def fake_planner(seen, cut: bool = True):
+    return FakeGemini(plan=two_scene_plan(cut), seen=seen).client
+
+
+def planned_project(client, tmp_path, monkeypatch, with_preview=True, cut=True):
     pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
     client.patch(f"/api/projects/{pid}", json={"description": "An office."})
     if with_preview:
@@ -229,7 +229,7 @@ def planned_project(client, tmp_path, monkeypatch, with_preview=True):
         assert wait_job(client, pid)["status"] == "done"
     make_voice(client, tmp_path, monkeypatch, pid, text=SCRIPT + " " + SCRIPT)  # ~37 s: four steps or more
     seen = []
-    monkeypatch.setattr(google.genai, "Client", fake_planner(seen))
+    monkeypatch.setattr(google.genai, "Client", fake_planner(seen, cut))
     assert client.post(f"/api/projects/{pid}/run/plan").status_code == 202
     job = wait_job(client, pid)
     assert job["status"] == "done", job
@@ -336,3 +336,105 @@ def test_scene_fingerprints_bible_vs_shot(client, tmp_path, monkeypatch):
     wait_job(client, pid)
     pic = phases.scene_fingerprints(projects.load(pid))
     assert pic[1] != both[1] and pic[2] == both[2]
+
+
+# -- phase 4: the video, scene by scene -------------------------------------------------------------
+def video_project(client, tmp_path, monkeypatch, cut=False):
+    """A planned project whose Gemini and Omni are fakes, ready to make clips."""
+    pid, _ = planned_project(client, tmp_path, monkeypatch, cut=cut)
+    gem = FakeGemini(omni=FakeInteractions())
+    monkeypatch.setattr(google.genai, "Client", gem.client)
+    monkeypatch.setattr(mv, "POLL_SECONDS", 0)
+    return pid, gem
+
+
+def video_view(client, pid):
+    return client.get(f"/api/projects/{pid}/video").json()
+
+
+def run_video(client, pid, scenes=None):
+    body = {"scenes": scenes} if scenes else {}
+    assert client.post(f"/api/projects/{pid}/run/video", json=body).status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "done", job
+    return job
+
+
+def test_generate_all_makes_rough_cut(client, tmp_path, monkeypatch):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    assert client.post(f"/api/projects/{pid}/run/video", json={}).status_code == 400  # no plan yet
+    assert video_view(client, pid) == {"scenes": [], "rough_cut": False}
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    data = video_view(client, pid)
+    assert [s["status"] for s in data["scenes"]] == ["missing", "missing"] and data["rough_cut"] is False
+    assert [s["number"] for s in data["scenes"]] == [1, 2] and data["scenes"][1]["start"] == data["scenes"][0]["end"]
+    assert client.post(f"/api/projects/{pid}/run/video", json={"scenes": [9]}).status_code == 400
+    job = run_video(client, pid)
+    assert job["scenes"] is None
+    data = video_view(client, pid)
+    assert data["rough_cut"] and [s["status"] for s in data["scenes"]] == ["ready", "ready"]
+    steps = [st for s in data["scenes"] for st in s["steps"]]
+    assert all(st["clip"] for st in steps) and len(steps) == len(gem.omni.bodies) >= 4
+    assert client.get(f"/api/projects/{pid}/files/{steps[0]['clip']}").status_code == 200
+    assert client.get(f"/api/projects/{pid}/files/rough_cut.mp4").status_code == 200
+    assert gem.checks == len(steps) and gem.fits == len(steps) - 1  # every clip reviewed, every later one fitted
+    proj = client.get(f"/api/projects/{pid}").json()
+    assert proj["video"]["version"] == 1 and proj["files"]["rough_cut"]
+    assert proj["phases"]["video"] == {"status": "ready", "reason": "", "summary": "2 of 2 scenes"}
+    # Generate all again: everything is ready, so nothing is made.
+    run_video(client, pid)
+    assert len(gem.omni.bodies) == len(steps)
+
+
+def test_regenerate_one_scene_replaces_only_its_clips_and_flags_next(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    folder = projects.folder(pid)
+    scenes = video_view(client, pid)["scenes"]
+    clips = [[folder / st["clip"] for st in s["steps"]] for s in scenes]
+    before = [[c.stat().st_mtime_ns for c in group] for group in clips]
+    made = len(gem.omni.bodies)
+    assert run_video(client, pid, scenes=[1])["scenes"] == [1]
+    data = video_view(client, pid)
+    assert [s["status"] for s in data["scenes"]] == ["ready", "older_footage"]
+    assert len(gem.omni.bodies) == made + len(clips[0])
+    assert [c.stat().st_mtime_ns for c in clips[1]] == before[1]  # scene 2 untouched
+    assert all(c.stat().st_mtime_ns != b for c, b in zip(clips[0], before[0]))
+    assert client.get(f"/api/projects/{pid}").json()["video"]["version"] == 2  # rough cut rebuilt
+    run_video(client, pid, scenes=[2])  # continue from the new footage
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+    # A cut never continues older footage.
+    pid2, gem2 = video_project(client, tmp_path, monkeypatch, cut=True)
+    run_video(client, pid2)
+    run_video(client, pid2, scenes=[1])
+    assert [s["status"] for s in video_view(client, pid2)["scenes"]] == ["ready", "ready"]
+
+
+def test_plan_edit_marks_its_scene_stale_and_generate_all_redoes_only_it(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    made = len(gem.omni.bodies)
+    plan = client.get(f"/api/projects/{pid}/plan").json()["plan"]
+    plan["shots"][-1]["action"] = "Ana closes the laptop"
+    client.put(f"/api/projects/{pid}/plan", json={"plan": plan})
+    scenes = video_view(client, pid)["scenes"]
+    assert [s["status"] for s in scenes] == ["ready", "stale"]
+    run_video(client, pid)
+    assert len(gem.omni.bodies) == made + len(scenes[1]["steps"])
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+
+
+def test_regenerated_scene_refits_prompt(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    first_of_2 = video_view(client, pid)["scenes"][1]["steps"][0]["index"]
+    item = next(it for it in client.get(f"/api/projects/{pid}/plan").json()["items"] if it["index"] == first_of_2)
+    assert item["prompt"].splitlines()[1] == "IN FRAME NOW: Ana centre, bench frame-left"
+    assert "IN FRAME NOW" not in item["source_prompt"]
+    gem.in_frame = "Ana at the window"  # scene 1's footage now ends differently
+    run_video(client, pid, scenes=[1])
+    fits = gem.fits
+    run_video(client, pid, scenes=[2])
+    item = next(it for it in client.get(f"/api/projects/{pid}/plan").json()["items"] if it["index"] == first_of_2)
+    assert item["prompt"].splitlines()[1] == "IN FRAME NOW: Ana at the window"
+    assert "fitted" in item["prompt"] and gem.fits == fits + len(video_view(client, pid)["scenes"][1]["steps"])
