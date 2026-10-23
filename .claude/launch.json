@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "server",
+      "runtimeExecutable": "/Users/ilmari/Documents/claude/ai-video-maker/.venv/bin/python",
+      "runtimeArgs": ["-m", "server", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

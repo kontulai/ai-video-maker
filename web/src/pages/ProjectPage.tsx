@@ -10,7 +10,7 @@ import SettingPhase from "../phases/SettingPhase";
 import TalkTrackPhase from "../phases/TalkTrackPhase";
 import ScenePlanPhase from "../phases/ScenePlanPhase";
 import VideoPhase from "../phases/VideoPhase";
-import OverlaysPhase from "../phases/OverlaysPhase";
+import OverlaysPhase from "../phases/overlays/OverlaysPhase";
 import FinalPhase from "../phases/FinalPhase";
 
 export interface PhaseProps {
