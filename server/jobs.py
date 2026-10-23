@@ -94,9 +94,14 @@ class JobRunner:
         if not path.exists():
             return None
         try:
-            return Job.model_validate_json(path.read_text())
+            saved = Job.model_validate_json(path.read_text())
         except ValueError:
             return None
+        if saved.status == "running":
+            # No thread is running it: the server stopped while it ran.
+            saved.status, saved.error, saved.finished = "failed", "interrupted (server stopped)", _now()
+            self._save(project_id, saved)
+        return saved
 
     def subscribe(self, project_id: str) -> Iterator[str]:
         """The lines so far, then new ones until the job ends."""

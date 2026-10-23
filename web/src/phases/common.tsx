@@ -11,15 +11,18 @@ export function fmtTime(s: number): string {
 }
 
 /** A button that starts a job and reloads the project so the log and stepper follow. */
-export function RunButton({ project, kind, body, label, primary, confirmText, reload, disabled }: {
+export function RunButton({ project, kind, body, label, primary, confirmText, reload, disabled, before }: {
   project: Project; kind: JobKind; body?: unknown; label: string; primary?: boolean; confirmText?: string;
   reload: () => Promise<void> | void; disabled?: boolean;
+  /** Runs before the job is started, e.g. to save pending edits the job will read. */
+  before?: () => Promise<void>;
 }) {
   const [error, setError] = useState("");
   const start = async () => {
     if (confirmText && !window.confirm(confirmText)) return;
     try {
       setError("");
+      if (before) await before();
       await runJob(project.id, kind, body);
       await reload();
     } catch (e) {

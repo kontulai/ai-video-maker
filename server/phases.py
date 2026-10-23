@@ -3,6 +3,7 @@ job thread, takes the project id and the job's log function, and saves the proje
 when its output is complete. Nothing here is called without a POST .../run/... route."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import make_video as mv
@@ -27,6 +28,22 @@ def _unlink(*paths: Path) -> None:
             path.unlink()
 
 
+@contextmanager
+def _keep_old(*paths: Path):
+    """Move a phase's old output aside while it is remade, so a failed run leaves the
+    old output in place instead of nothing."""
+    aside = [(path, path.with_name(path.name + ".old")) for path in paths if path.exists()]
+    for path, old in aside:
+        path.replace(old)
+    try:
+        yield
+    except BaseException:
+        for path, old in aside:
+            old.replace(path)
+        raise
+    _unlink(*(old for _, old in aside))
+
+
 # -- phase 1: setting -------------------------------------------------------------------
 def generate_preview(p: Project, log) -> None:
     run = projects.folder(p.id)
@@ -41,8 +58,8 @@ def generate_preview(p: Project, log) -> None:
 def generate_voice(p: Project, log) -> None:
     run = projects.folder(p.id)
     (run / "talk_track.txt").write_text(p.talk_track)
-    _unlink(run / "voice.mp3", run / "alignment.json")
-    audio, _alignment = mv.generate_voice(p.talk_track, run)
+    with _keep_old(run / "voice.mp3", run / "alignment.json"):
+        audio, _alignment = mv.generate_voice(p.talk_track, run)
     _commit(p.id, "voice", voice_seconds=round(mv.media_duration(audio), 2))
 
 
@@ -100,8 +117,15 @@ def scene_fingerprints(p: Project) -> dict[int, str]:
             out[scene] = hashlib.sha1()
             if scene == 1 and p.current_preview:
                 out[scene].update(p.current_preview.encode())
-        out[scene].update(item.get("source_prompt", item["prompt"]).encode())
+        text = item["prompt"] if item.get("pinned_for") else item.get("source_prompt", item["prompt"])
+        out[scene].update(text.encode())
     return {scene: h.hexdigest() for scene, h in out.items()}
+
+
+def without_in_frame(prompt: str) -> str:
+    """The prompt without the IN FRAME NOW line a previous fit added; fitting puts a
+    fresh one in when the clip is made."""
+    return "\n".join(ln for ln in prompt.splitlines() if not ln.startswith(mv.IN_FRAME_PREFIX))
 
 
 def _write_plan_files(run: Path, plan: mv.VideoPlan, segments: list[Segment], items: list[dict]) -> None:
@@ -117,17 +141,17 @@ def generate_plan(p: Project, log) -> None:
         raise RuntimeError("Generate the voice track first.")
     duration = mv.media_duration(run / "voice.mp3")
     segments = plan_segments(words_from_alignment(alignment), duration, p.settings.max_scene)
-    write_json(run / "segments.json", [s.to_dict() for s in segments])
     log(f"{len(segments)} steps, {segments[-1].end}s for {duration:.1f}s of audio.")
-    _unlink(run / "plan.json", run / "prompts.json")
-    items = mv.plan_prompts(p.description, p.talk_track, segments, run, p.settings.max_scene,
-                            image=preview_path(p))
-    for item in items:
-        item["source_prompt"] = item["prompt"]
-        item["pinned_for"] = ""
-    segments = [Segment.from_dict(it) for it in items]
-    write_json(run / "segments.json", [s.to_dict() for s in segments])
-    write_json(run / "prompts.json", items)
+    with _keep_old(run / "plan.json", run / "segments.json", run / "prompts.json"):
+        write_json(run / "segments.json", [s.to_dict() for s in segments])
+        items = mv.plan_prompts(p.description, p.talk_track, segments, run, p.settings.max_scene,
+                                image=preview_path(p))
+        for item in items:
+            item["source_prompt"] = item["prompt"]
+            item["pinned_for"] = ""
+        segments = [Segment.from_dict(it) for it in items]
+        write_json(run / "segments.json", [s.to_dict() for s in segments])
+        write_json(run / "prompts.json", items)
     log(f"{segments[-1].scene} scene(s) planned.")
     _commit(p.id, "plan")
 
@@ -161,7 +185,7 @@ def pin_prompt(p: Project, index: int, prompt: str) -> list[dict]:
     items = load_items(p)
     for item in items:
         if item["index"] == index:
-            item["prompt"] = prompt
+            item["prompt"] = without_in_frame(prompt)
             item["pinned_for"] = shot_fingerprint(plan, index) if plan else "hand"
             break
     else:
@@ -257,26 +281,31 @@ def generate_video(p: Project, log, scenes: list[int] | None = None) -> None:
         _unlink(run / clip_name(it["index"]), clip_dir / f"lastframe_{pos:02d}.png")
         state.pop(str(it["index"]), None)
         if it.get("pinned_for"):
-            pinned[it["index"]] = it["prompt"]  # sent as written; fitting is not saved over it
+            pinned[it["index"]] = it["prompt"]  # fitted to the footage when sent, kept as written after
         elif it.get("source_prompt"):
             it["prompt"] = it["source_prompt"]  # drop the old fit so the prompt is fitted again
     write_json(state_path, state)
     write_json(run / "prompts.json", items)
+    # The clips are made in order up to the last scene asked for: a missing earlier scene
+    # is made on the way (the asked-for one continues from it); later ones are left alone.
+    last = max((pos for pos, it in enumerate(items) if int(it.get("scene", 1)) in targets), default=-1)
+    work = items[:last + 1]
+    made = {int(it.get("scene", 1)) for it in work if not (run / clip_name(it["index"])).exists()}
     if targets:
-        log(f"Generating scene(s) {', '.join(map(str, targets))}...")
+        log(f"Generating scene(s) {', '.join(map(str, sorted(made)))}...")
     else:
         log("Every scene is up to date.")
     try:
-        mv.generate_clips(items, run, p.settings.aspect, p.settings.resolution, start_image=preview_path(p),
-                          text_retries=p.settings.text_retries, fit=True)
+        if work:
+            mv.generate_clips(work, run, p.settings.aspect, p.settings.resolution, start_image=preview_path(p),
+                              text_retries=p.settings.text_retries, fit=True)
     finally:
-        if pinned:
-            saved = load_items(p)
-            for it in saved:
-                if it["index"] in pinned:
-                    it["prompt"] = pinned[it["index"]]
-            write_json(run / "prompts.json", saved)
-        _record_scenes(p.id, targets, log)
+        # generate_clips saves the fitted prompts of `work` only; write the whole list back.
+        for it in items:
+            if it["index"] in pinned:
+                it["prompt"] = pinned[it["index"]]
+        write_json(run / "prompts.json", items)
+        _record_scenes(p.id, sorted(made), log)
 
 
 def _record_scenes(project_id: str, targets: list[int], log) -> None:

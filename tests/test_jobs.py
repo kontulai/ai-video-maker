@@ -99,3 +99,16 @@ def test_subscribe_replays_then_follows(pid):
     # after the job finished, subscribing replays the lines and stops
     assert [plain(x) for x in runner.subscribe(pid)] == ["first", "second"]
     assert list(runner.subscribe("nope")) == []
+
+
+def test_interrupted_job_reads_as_failed(pid):
+    """A job.json left as `running` by a server that stopped is reported, and saved, as failed."""
+    runner = JobRunner()
+    job = runner.start(pid, "video", lambda log: log("half way"))
+    wait_for(job)
+    path = projects.folder(pid) / "job.json"
+    path.write_text(job.model_copy(update={"status": "running", "finished": None}).model_dump_json())
+    seen = JobRunner().current(pid)
+    assert seen.status == "failed" and seen.error == "interrupted (server stopped)"
+    assert seen.finished is not None and [plain(x) for x in seen.log] == ["half way"]
+    assert '"status":"failed"' in path.read_text().replace(" ", "")

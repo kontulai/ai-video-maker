@@ -128,6 +128,13 @@ def delete_project(project_id: str) -> Response:
 
 
 # -- jobs ---------------------------------------------------------------------------------------
+def no_job(p: Project, *phases_: str) -> None:
+    """Refuse an edit while a job that reads or writes the same files runs."""
+    job = runner.current(p.id)
+    if job and job.status == "running" and job.phase in phases_:
+        raise HTTPException(409, f"The {job.phase} job is running; edit when it has finished")
+
+
 def start_job(p: Project, phase: str, fn, scenes: list[int] | None = None) -> Job:
     try:
         return runner.start(p.id, phase, lambda log: fn(p, log), scenes=scenes)
@@ -224,13 +231,15 @@ def put_plan(project_id: str, body: PlanBody) -> dict:
     p = get_project(project_id)
     if not phases.load_segments(p):
         raise HTTPException(400, "Generate the plan first")
-    phases.rebuild_prompts(p, body.plan, phases.pinned_prompts(p) | {})
+    no_job(p, "plan", "video")
+    phases.rebuild_prompts(p, body.plan, phases.pinned_prompts(p))
     return plan_view(p)
 
 
 @app.put("/api/projects/{project_id}/prompts/{index}")
 def put_prompt(project_id: str, index: int, body: PromptBody) -> dict:
     p = get_project(project_id)
+    no_job(p, "plan", "video")
     try:
         phases.pin_prompt(p, index, body.prompt)
     except KeyError:
@@ -282,6 +291,7 @@ def read_overlays(project_id: str) -> dict:
 @app.put("/api/projects/{project_id}/overlays")
 def put_overlays(project_id: str, body: OverlaysBody) -> dict:
     p = get_project(project_id)
+    no_job(p, "overlays", "preview-render", "final")
     phases.save_overlays(p, body.accent_color, body.overlays)
     return overlays_view(p)
 
@@ -298,7 +308,7 @@ def run_overlays(project_id: str, body: SuggestBody | None = None) -> Job:
 def run_preview_render(project_id: str) -> Job:
     p = get_project(project_id)
     need_rough_cut(p)
-    return start_job(p, "overlays", lambda p, log: phases.render(p, log, "overlay_preview.mp4"))
+    return start_job(p, "preview-render", lambda p, log: phases.render(p, log, "overlay_preview.mp4"))
 
 
 @app.post("/api/projects/{project_id}/run/final", status_code=202)

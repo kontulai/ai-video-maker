@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { errorText, fileUrl, putOverlays } from "../../api";
 import type { Overlay, OverlaysView, Project } from "../../types";
 import { fmtTime } from "../common";
@@ -9,9 +9,16 @@ import { newId, newOverlay, round3 } from "./overlayModel";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
+export interface EditorHandle {
+  /** Saves pending edits now; resolves when they are on the server (or the save failed). */
+  flush: () => Promise<void>;
+}
+
 /** The overlay editor: the rough cut with the overlays drawn on top, a timeline and a side form.
- * Every change is saved to callouts.json 400 ms after the last edit. */
-export default function Editor({ project, view, onOverlays }: { project: Project; view: OverlaysView; onOverlays: (o: Overlay[]) => void }) {
+ * Every change is saved to callouts.json 400 ms after the last edit. While `locked` (a job is
+ * reading callouts.json) edits are kept and saved when the lock lifts. */
+const Editor = forwardRef<EditorHandle, { project: Project; view: OverlaysView; onOverlays: (o: Overlay[]) => void; locked?: boolean }>(
+function Editor({ project, view, onOverlays, locked = false }, ref) {
   const [overlays, setOverlays] = useState<Overlay[]>(view.overlays);
   const [accent, setAccent] = useState(view.accent_color);
   const [selected, setSelected] = useState<string | null>(null);
@@ -23,11 +30,16 @@ export default function Editor({ project, view, onOverlays }: { project: Project
   const timer = useRef<number>();
   const latest = useRef({ accent, overlays });
   latest.current = { accent, overlays };
+  const lockedRef = useRef(locked);
+  lockedRef.current = locked;
+  const pending = useRef(false);
   useEffect(() => onOverlays(overlays), [overlays, onOverlays]);
 
   const flush = useCallback(async () => {
     window.clearTimeout(timer.current);
     timer.current = undefined;
+    if (lockedRef.current) return; // kept as dirty; saved when the lock lifts
+    pending.current = false;
     setSave("saving");
     try {
       await putOverlays(project.id, latest.current.accent, latest.current.overlays);
@@ -38,12 +50,17 @@ export default function Editor({ project, view, onOverlays }: { project: Project
     }
   }, [project.id]);
   const schedule = useCallback(() => {
+    pending.current = true;
     setSave("dirty");
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => void flush(), 400);
   }, [flush]);
+  useImperativeHandle(ref, () => ({ flush: async () => { if (pending.current) await flush(); } }), [flush]);
+  useEffect(() => {
+    if (!locked && pending.current && timer.current === undefined) void flush();
+  }, [locked, flush]);
   useEffect(() => () => {
-    if (timer.current !== undefined) {
+    if (pending.current) {
       window.clearTimeout(timer.current);
       void putOverlays(project.id, latest.current.accent, latest.current.overlays).catch(() => undefined);
     }
@@ -100,7 +117,7 @@ export default function Editor({ project, view, onOverlays }: { project: Project
   };
 
   const current = overlays.find((o) => o.id === selected) ?? null;
-  const saveText = save === "saved" ? "All changes saved." : save === "dirty" ? "Unsaved changes..." : save === "saving" ? "Saving..." : `Could not save: ${saveError}`;
+  const saveText = save === "saved" ? "All changes saved." : save === "dirty" ? (locked ? "Unsaved changes, saved when the job finishes." : "Unsaved changes...") : save === "saving" ? "Saving..." : `Could not save: ${saveError}`;
 
   return (
     <div className="editor">
@@ -135,4 +152,6 @@ export default function Editor({ project, view, onOverlays }: { project: Project
         onChange={(patch) => current && update(current.id, patch)} onAccent={changeAccent} onDuplicate={duplicate} onDelete={remove} />
     </div>
   );
-}
+});
+
+export default Editor;

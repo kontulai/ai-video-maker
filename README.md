@@ -128,3 +128,9 @@ Each run gets a folder under `runs/` containing the inputs, `voice.mp3`, `segmen
 ```
 
 The tests need no API keys. They check the segmentation, run the whole pipeline with fake APIs, and exercise the web server's API with the same fakes.
+
+```bash
+cd web && npm test
+```
+
+The web tests (vitest and Testing Library) cover the parts of the UI that keep edits safe while jobs run: the scene plan page, the overlay editor and the stepper.

@@ -1,5 +1,6 @@
 """The HTTP API: project CRUD, files, and the preview and voice jobs."""
 import base64
+import json
 import struct
 import sys
 import time
@@ -160,6 +161,21 @@ def test_voice_job_uses_fake_elevenlabs(client, tmp_path, monkeypatch):
     assert "data: " in r.text and r.text.rstrip().endswith("event: end\ndata: done")
 
 
+def test_failed_voice_regeneration_keeps_old_voice(client, tmp_path, monkeypatch):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    make_voice(client, tmp_path, monkeypatch, pid, text="Hello there, this is the first take.")
+    folder = projects.folder(pid)
+    old = {name: (folder / name).read_bytes() for name in ("voice.mp3", "alignment.json")}
+    monkeypatch.setattr(mv.requests, "post", lambda url, **kw: SimpleNamespace(status_code=500, json=dict, text="down"))
+    client.patch(f"/api/projects/{pid}", json={"talk_track": "A longer second take that fails."})
+    assert client.post(f"/api/projects/{pid}/run/voice").status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "failed" and "500" in job["error"]
+    assert {name: (folder / name).read_bytes() for name in old} == old
+    p = client.get(f"/api/projects/{pid}").json()
+    assert p["voice"]["version"] == 1 and p["files"]["voice"] is True
+
+
 def test_run_twice_is_409(client, monkeypatch):
     import threading
     gate = threading.Event()
@@ -288,6 +304,42 @@ def test_put_plan_rebuilds_without_gemini(client, tmp_path, monkeypatch):
     segs = client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).json()["segments"]
     assert [s["scene"] for s in segs].index(2) == plan["scenes"][1]["first_segment"] - 1
     assert client.put(f"/api/projects/{pid}/plan", json={"plan": {"title": "x"}}).status_code == 422
+
+
+def test_failed_plan_regeneration_keeps_old_plan(client, tmp_path, monkeypatch):
+    pid, _ = planned_project(client, tmp_path, monkeypatch)
+    folder = projects.folder(pid)
+    names = ("plan.json", "segments.json", "prompts.json")
+    old = {name: (folder / name).read_bytes() for name in names}
+
+    def boom(contents):
+        raise RuntimeError("Gemini is down")
+    monkeypatch.setattr(google.genai, "Client", FakeGemini(plan=boom).client)
+    client.patch(f"/api/projects/{pid}", json={"settings": {"max_scene": 20}})
+    assert client.post(f"/api/projects/{pid}/run/plan").status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "failed" and "Gemini is down" in job["error"]
+    assert {name: (folder / name).read_bytes() for name in names} == old
+    assert client.get(f"/api/projects/{pid}").json()["plan"]["version"] == 1
+    assert len(client.get(f"/api/projects/{pid}/plan").json()["items"]) == len(json.loads(old["prompts.json"]))
+
+
+def test_plan_edits_are_refused_while_plan_or_video_job_runs(client, tmp_path, monkeypatch):
+    import threading
+    pid, _ = planned_project(client, tmp_path, monkeypatch)
+    plan = client.get(f"/api/projects/{pid}/plan").json()["plan"]
+    gate = threading.Event()
+    for phase in ("plan", "video"):
+        monkeypatch.setattr(server_app.phases, "generate_" + phase, lambda p, log, *a: gate.wait(5))
+        assert client.post(f"/api/projects/{pid}/run/{phase}", json={}).status_code == 202
+        r = client.put(f"/api/projects/{pid}/plan", json={"plan": plan})
+        assert r.status_code == 409 and "running" in r.json()["detail"]
+        assert client.put(f"/api/projects/{pid}/prompts/1", json={"prompt": "x"}).status_code == 409
+        gate.set()
+        wait_job(client, pid)
+        gate.clear()
+    assert client.get(f"/api/projects/{pid}/plan").json()["items"][0]["prompt"] != "x"
+    assert client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).status_code == 200
 
 
 def test_pinned_prompt_survives_unrelated_edit_and_drops_on_its_shot_edit(client, tmp_path, monkeypatch):
@@ -440,6 +492,67 @@ def test_regenerated_scene_refits_prompt(client, tmp_path, monkeypatch):
     assert "fitted" in item["prompt"] and gem.fits == fits + len(video_view(client, pid)["scenes"][1]["steps"])
 
 
+def test_regenerate_one_scene_makes_no_other_missing_scene(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    folder = projects.folder(pid)
+    scenes = video_view(client, pid)["scenes"]
+    for st in scenes[1]["steps"]:
+        (folder / st["clip"]).unlink()
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "missing"]
+    made = len(gem.omni.bodies)
+    run_video(client, pid, scenes=[1])
+    assert len(gem.omni.bodies) == made + len(scenes[0]["steps"])
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "missing"]
+    # Asking for scene 2 while scene 1 is missing makes scene 1 too (scene 2 continues
+    # from it) and records both.
+    for st in scenes[0]["steps"]:
+        (folder / st["clip"]).unlink()
+    run_video(client, pid, scenes=[2])
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+
+
+def test_pinning_prompt_marks_scene_stale(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    scenes = video_view(client, pid)["scenes"]
+    index = scenes[1]["steps"][-1]["index"]
+    item = next(it for it in client.get(f"/api/projects/{pid}/plan").json()["items"] if it["index"] == index)
+    r = client.put(f"/api/projects/{pid}/prompts/{index}", json={"prompt": item["prompt"] + "\nAVOID: clutter"})
+    assert r.status_code == 200
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "stale"]
+    run_video(client, pid, scenes=[2])
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+    # pinning the same text again changes nothing
+    client.put(f"/api/projects/{pid}/prompts/{index}", json={"prompt": item["prompt"] + "\nAVOID: clutter"})
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+
+
+def test_pinned_fitted_prompt_is_refitted(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    first_of_2 = video_view(client, pid)["scenes"][1]["steps"][0]["index"]
+    items = client.get(f"/api/projects/{pid}/plan").json()["items"]
+    item = next(it for it in items if it["index"] == first_of_2)
+    assert item["prompt"].splitlines()[1] == "IN FRAME NOW: Ana centre, bench frame-left"
+    # the user pins the fitted text with a change of their own; the stale IN FRAME line is dropped
+    pinned = item["prompt"].replace("EXPRESSION: calm", "EXPRESSION: amused")
+    saved = client.put(f"/api/projects/{pid}/prompts/{first_of_2}", json={"prompt": pinned}).json()["items"]
+    kept = next(it for it in saved if it["index"] == first_of_2)["prompt"]
+    assert "IN FRAME NOW" not in kept and "EXPRESSION: amused" in kept
+    gem.in_frame = "Ana at the window"
+    run_video(client, pid, scenes=[1])
+    fits = gem.fits
+    run_video(client, pid, scenes=[2])
+    pos = next(i for i, it in enumerate(items) if it["index"] == first_of_2)
+    prompts_sent = [b for b in gem.omni.bodies[-(len(items) - pos):]]
+    text_sent = json.dumps(prompts_sent[0])
+    assert "IN FRAME NOW: Ana at the window" in text_sent and "amused, fitted" not in text_sent
+    assert "EXPRESSION: amused" in text_sent and gem.fits == fits + len(video_view(client, pid)["scenes"][1]["steps"])
+    item = next(it for it in client.get(f"/api/projects/{pid}/plan").json()["items"] if it["index"] == first_of_2)
+    assert item["prompt"] == kept and item["pinned_for"]  # the pin is kept as written
+
+
 # -- Task 7: overlays and renders -----------------------------------------------------------------
 import subprocess  # noqa: E402
 import callouts as fx  # noqa: E402
@@ -518,6 +631,37 @@ def test_suggest_overlays_times_and_keeps_edited(client, tmp_path, monkeypatch):
     assert client.patch(f"/api/projects/{pid}", json={"settings": {"density": "off"}}).status_code == 200
     run_phase(client, pid, "overlays", {"replace_edited": True})
     assert overlays_view(client, pid)["overlays"] == [] and len(gem.seen) == calls
+
+
+def test_preview_render_has_its_own_job_phase(client, tmp_path, monkeypatch):
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": [overlay(id="a")]})
+    assert run_phase(client, pid, "preview-render")["phase"] == "preview-render"
+    assert run_phase(client, pid, "overlays", {"replace_edited": True})["phase"] == "overlays"
+
+
+def test_overlay_edits_are_refused_while_an_overlays_or_render_job_runs(client, tmp_path, monkeypatch):
+    import threading
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    body = {"accent_color": "#00FF00", "overlays": [overlay(id="a")]}
+    assert client.put(f"/api/projects/{pid}/overlays", json=body).status_code == 200
+    gate = threading.Event()
+    monkeypatch.setattr(server_app.phases, "suggest_overlays", lambda p, log, replace: gate.wait(5))
+    monkeypatch.setattr(server_app.phases, "render", lambda p, log, name: gate.wait(5))
+    for phase in ("overlays", "preview-render", "final"):
+        assert client.post(f"/api/projects/{pid}/run/{phase}", json={}).status_code == 202
+        r = client.put(f"/api/projects/{pid}/overlays", json={**body, "accent_color": "#FF0000"})
+        assert r.status_code == 409 and "running" in r.json()["detail"]
+        gate.set()
+        wait_job(client, pid)
+        gate.clear()
+    assert overlays_view(client, pid)["accent_color"] == "#00FF00"
+    # a video job does not lock the overlays
+    monkeypatch.setattr(server_app.phases, "generate_video", lambda p, log, scenes: gate.wait(5))
+    assert client.post(f"/api/projects/{pid}/run/video", json={}).status_code == 202
+    assert client.put(f"/api/projects/{pid}/overlays", json={**body, "accent_color": "#FF0000"}).status_code == 200
+    gate.set()
+    wait_job(client, pid)
 
 
 def test_render_preview_burns_exact_times(client, tmp_path, monkeypatch):

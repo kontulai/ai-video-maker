@@ -20,7 +20,7 @@ export default function Stepper({ project, current, onSelect }: { project: Proje
     <nav className="steps">
       {PHASES.map((phase, i) => {
         const state = project.phases[phase];
-        const running = job?.phase === phase || (job?.phase === "overlays" && phase === "overlays");
+        const running = job?.phase === phase || (job?.phase === "preview-render" && phase === "overlays");
         const cls = [phase === current ? "current" : state.status, running ? "running" : ""].join(" ");
         const summary = running ? "running..." : state.status === "stale" ? `stale: ${state.reason}` : state.summary || (state.status === "empty" ? "not yet" : "done");
         return (

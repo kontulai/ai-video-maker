@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, getPlan, putPlan, putPrompt } from "../api";
 import type { PhaseProps } from "../pages/ProjectPage";
 import type { PlanView, ScenePlan, Segment, VideoPlan } from "../types";
@@ -29,6 +29,10 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
   const [dirty, setDirty] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [error, setError] = useState("");
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  // The server refuses plan edits while a plan or video job reads or writes the same files.
+  const locked = project.job?.status === "running" && (project.job.phase === "plan" || project.job.phase === "video");
 
   const load = useCallback(async () => {
     try {
@@ -40,7 +44,10 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
       setError(errorText(e));
     }
   }, [project.id]);
-  useEffect(() => { void load(); }, [load, project.plan.version, project.job?.status]);
+  // Follow the project record (a new plan, a finished job) unless edits are pending: they stay until saved or discarded.
+  useEffect(() => {
+    if (!dirtyRef.current) void load();
+  }, [load, project.plan.version, project.job?.status]);
 
   const edit = (fn: (p: VideoPlan) => void) => {
     if (!plan) return;
@@ -89,6 +96,7 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
           <span className="spacer" />
           {hasPlan && <button className="primary" disabled={dirty} onClick={() => goTo("video")}>Continue to video &rarr;</button>}
         </div>
+        {locked && <p className="warn">The {project.job?.phase} job is running. Edits can be saved when it has finished.</p>}
         {error && <p className="error">{error}</p>}
       </div>
 
@@ -168,7 +176,7 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
                         <p className="warn">No shot for this step. Regenerate the plan.</p>
                       )}
                       {view.too_long.includes(seg.index) && <p className="warn">This step's prompt is longer than the model accepts. Shorten the bible or the shot.</p>}
-                      {showPrompts && item && <PromptEditor index={seg.index} prompt={item.prompt} pinned={!!item.pinned_for} onSave={savePrompt} />}
+                      {showPrompts && item && <PromptEditor index={seg.index} prompt={item.prompt} pinned={!!item.pinned_for} disabled={locked} onSave={savePrompt} />}
                     </div>
                   );
                 })}
@@ -177,7 +185,7 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
           })}
 
           <div className="panel row" style={{ position: "sticky", bottom: 8 }}>
-            <button className="primary" onClick={save} disabled={!dirty}>{dirty ? "Save plan" : "Plan saved"}</button>
+            <button className="primary" onClick={save} disabled={!dirty || locked}>{dirty ? "Save plan" : "Plan saved"}</button>
             {dirty && <button onClick={load}>Discard edits</button>}
             <span className="spacer" />
             <label style={{ margin: 0 }}><input type="checkbox" checked={showPrompts} onChange={(e) => setShowPrompts(e.target.checked)} /> Show prompts</label>
@@ -188,14 +196,14 @@ export default function ScenePlanPhase({ project, reload, goTo }: PhaseProps) {
   );
 }
 
-function PromptEditor({ index, prompt, pinned, onSave }: { index: number; prompt: string; pinned: boolean; onSave: (i: number, p: string) => Promise<void> }) {
+function PromptEditor({ index, prompt, pinned, disabled, onSave }: { index: number; prompt: string; pinned: boolean; disabled: boolean; onSave: (i: number, p: string) => Promise<void> }) {
   const [text, setText] = useState(prompt);
   useEffect(() => setText(prompt), [prompt]);
   return (
     <div style={{ marginTop: 8 }}>
       <label>Prompt sent to the video model {pinned && <span className="badge pinned">pinned: kept as written until its shot or the bible changes</span>}</label>
       <textarea className="prompt" rows={8} value={text} onChange={(e) => setText(e.target.value)} />
-      <button className="small" disabled={text === prompt} onClick={() => onSave(index, text)}>Save prompt</button>
+      <button className="small" disabled={text === prompt || disabled} onClick={() => onSave(index, text)}>Save prompt</button>
     </div>
   );
 }
