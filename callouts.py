@@ -201,6 +201,32 @@ class TimedCallout:
         return asdict(self)
 
 
+def stack_bullets(timed: list[TimedCallout]) -> list[TimedCallout]:
+    """Bullets of one list (same non-empty list_name) whose spans overlap become one list:
+    rows in start order, every item in the first item's position. Times never change.
+    Used by the web app, where the times in the file are the truth."""
+    ordered = sorted(timed, key=lambda t: (t.start, t.end))
+    out: list[TimedCallout] = []
+    groups: dict[str, list[TimedCallout]] = {}   # open group per list name
+    closed: list[list[TimedCallout]] = []
+    for t in ordered:
+        if t.style != "bullet" or not t.list_name:
+            out.append(TimedCallout(**{**asdict(t), "row": 0, "rows": 1}))
+            continue
+        group = groups.get(t.list_name)
+        if group is None or t.start >= max(g.end for g in group):
+            group = groups[t.list_name] = []
+            closed.append(group)
+        item = TimedCallout(**{**asdict(t), "position": (group[0].position if group else t.position),
+                               "row": len(group)})
+        group.append(item)
+        out.append(item)
+    for group in closed:
+        for item in group:
+            item.rows = len(group)
+    return sorted(out, key=lambda t: (t.start, t.end))
+
+
 def _band(position: str) -> str:
     return position.partition("-")[0]   # top, bottom or center
 

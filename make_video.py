@@ -30,9 +30,10 @@ import re
 import subprocess
 import sys
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import imageio_ffmpeg
 import requests
@@ -48,6 +49,7 @@ load_dotenv()
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 PROMPT_MODEL = os.getenv("PROMPT_MODEL", "gemini-4-argon")
 VIDEO_MODEL = os.getenv("VIDEO_MODEL", "gemini-omni-1.1-flash")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gemini-3.1-flash-image-preview")
 ELEVEN_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 ELEVEN_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 CALLOUT_FONT = os.getenv("CALLOUT_FONT", "Avenir Next Bold")
@@ -71,8 +73,16 @@ MAX_PROMPT_CHARS = 3600
 # Small helpers
 # ---------------------------------------------------------------------------
 
+# The web app sets this per job thread so the same lines the CLI prints reach its log.
+LOG_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("LOG_SINK", default=None)
+
+
 def log(msg: str) -> None:
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    line = f"[{datetime.now():%H:%M:%S}] {msg}"
+    print(line, flush=True)
+    sink = LOG_SINK.get()
+    if sink is not None:
+        sink(line)
 
 
 def read_multiline(question: str) -> str:
@@ -566,10 +576,38 @@ def scenes_from_plan(plan: VideoPlan, segments: list[Segment], max_scene: int) -
     return out
 
 
+def generate_preview_image(description: str, aspect: str, out: Path) -> Path:
+    """Make a still that shows what the video will look like, in the given aspect ratio,
+    with the same no-lettering rule the video prompts use. Returns `out`."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
+    prompt = (f"{description}\n\n{NO_TEXT_LINE}\n"
+              "A still frame from a film, photoreal, no captions or lettering.")
+    log(f"Generating a preview image with {IMAGE_MODEL}...")
+    resp = client.models.generate_content(
+        model=IMAGE_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=types.ImageConfig(aspect_ratio=aspect),
+        ),
+    )
+    for cand in resp.candidates or []:
+        for part in cand.content.parts or []:
+            data = getattr(getattr(part, "inline_data", None), "data", None)
+            if data:
+                out.write_bytes(bytes(data))
+                return out
+    raise RuntimeError("The image model returned no image.")
+
+
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
-                 max_scene: int = MAX_SCENE_SECONDS) -> list[dict]:
+                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None) -> list[dict]:
     """Have Gemini write the production bible, group the steps into scenes and write one
-    shot per step; returns one item per step with the prompt and the scene assignment."""
+    shot per step; returns one item per step with the prompt and the scene assignment.
+    With `image` (the first frame of the video) the bible describes what the picture shows."""
     prompts_path = run / "prompts.json"
     if prompts_path.exists():
         log("Prompts already exist, skipping planning.")
@@ -593,10 +631,16 @@ SEGMENTS ({len(segments)} segments, {segments[-1].end}s in all; group them into 
 {max_scene}s each and write one shot for each segment):
 {seg_list}
 """
+    contents: str | list = user_msg
+    if image is not None:
+        user_msg += ("\nThe attached picture is the first frame of the video: describe its people, "
+                     "room, light and style in the bible, do not invent others.\n")
+        mime = "image/jpeg" if image.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        contents = [types.Part.from_bytes(data=image.read_bytes(), mime_type=mime), user_msg]
     log(f"Planning {len(segments)} shots with {PROMPT_MODEL}...")
     resp = client.models.generate_content(
         model=PROMPT_MODEL,
-        contents=user_msg,
+        contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=PLANNER_INSTRUCTIONS,
             response_mime_type="application/json",
@@ -1058,8 +1102,8 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
 # Steps 6 + 7: concatenate, then add the voice track
 # ---------------------------------------------------------------------------
 
-def concatenate(clips: list[Path], run: Path) -> Path:
-    out = run / "video_silent.mp4"
+def concatenate(clips: list[Path], run: Path, name: str = "video_silent.mp4") -> Path:
+    out = run / name
     list_file = run / "concat.txt"
     list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in clips))
     log("Concatenating clips...")
@@ -1084,8 +1128,9 @@ def write_callouts_ass(callout_data: dict, alignment: dict, segments: list[Segme
     return path
 
 
-def add_voice(video: Path, audio: Path, run: Path, overlay: Path | None = None) -> Path:
-    out = run / "final.mp4"
+def add_voice(video: Path, audio: Path, run: Path, overlay: Path | None = None,
+              name: str = "final.mp4") -> Path:
+    out = run / name
     tail = 0.5  # keep a little picture after the last word
     length = min(media_duration(video), media_duration(audio) + tail)
     if overlay is None:
