@@ -45,6 +45,40 @@ Useful options:
 | `--no-fit` | Don't rewrite each prompt to match what the previous clip actually ends on (see below). |
 | `-y` | Skip the confirmation before generating video. |
 
+## Web app
+
+The same pipeline, one project at a time, as a browser app with six phases
+that can each be edited and rerun on their own.
+
+```bash
+uv pip install -p .venv -r requirements.txt   # adds FastAPI and uvicorn
+cd web && npm install && npm run build && cd ..
+.venv/bin/python -m server                     # then open http://127.0.0.1:8000
+```
+
+`python -m server --port 9000` picks another port. For frontend work run
+`npm run dev` in `web/` (Vite on port 5173, proxying `/api` to the Python
+server on 8000) next to `python -m server`.
+
+The phases of a project:
+
+1. **Setting**: describe the video and generate a preview image; regenerate
+   until it looks right. The chosen image is the first frame of the video.
+2. **Talk track**: write the narration and generate the ElevenLabs voice.
+3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
+   edit any of them, move scene breaks, or edit the assembled prompts.
+4. **Video**: generate every scene, then regenerate any single scene; play the
+   clips and the rough cut.
+5. **Overlays**: Gemini suggests keyword graphics over the rough cut; edit them
+   in a video editor with a timeline (add, move, retime, restyle, delete);
+   "Render preview" burns them with ffmpeg for an exact check.
+6. **Final**: burn the overlays, lay the voice over the picture, download.
+
+A phase whose inputs changed since it ran is marked stale with the phase to
+redo; nothing is regenerated without pressing a button. Projects live in
+`projects/<id>/` (override with `PROJECTS_DIR`) with the same files the
+command-line run folder has, plus `project.json` and `job.json`.
+
 ## How consistency is kept
 
 - **Production bible.** Gemini writes one exhaustive description of the visual style, setting, lighting and each character (face, hair, build, exact wardrobe), plus a **layout**: where everyone and everything is as the camera sees it, in `frame-left` / `frame-right` / `centre` / `foreground` / `background` terms, never a bare "left" or "right" (the model reads those from the character's point of view, which is how monitors end up on the wrong side). The bible goes **word for word** into the first prompt of every scene. Extensions don't repeat it: the model is continuing footage that already shows the room and the people, and a long bible on an extension only distracts it from the shot.
@@ -93,4 +127,4 @@ Each run gets a folder under `runs/` containing the inputs, `voice.mp3`, `segmen
 .venv/bin/python -m pytest -q tests
 ```
 
-The tests need no API keys. They check the segmentation and run the whole pipeline with fake APIs.
+The tests need no API keys. They check the segmentation, run the whole pipeline with fake APIs, and exercise the web server's API with the same fakes.
