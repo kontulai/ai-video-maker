@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
+import make_video as mv
 from . import phases, projects
 from .jobs import Job, JobBusy, JobRunner
 from .projects import Project, Settings
@@ -27,6 +28,10 @@ def _summaries(p: Project) -> dict[str, str]:
         out["setting"] = "preview ready"
     if p.voice.version:
         out["voice"] = f"voice {p.voice_seconds:.0f} s" if p.voice_seconds else "voice ready"
+    if p.plan.version:
+        items = phases.load_items(p)
+        n = max((int(it.get("scene", 1)) for it in items), default=0)
+        out["plan"] = f"{n} scene{'s' if n != 1 else ''}"
     return out
 
 
@@ -135,6 +140,14 @@ def run_voice(project_id: str) -> Job:
     return start_job(p, "voice", phases.generate_voice)
 
 
+@app.post("/api/projects/{project_id}/run/plan", status_code=202)
+def run_plan(project_id: str) -> Job:
+    p = get_project(project_id)
+    if not (projects.folder(p.id) / "alignment.json").exists():
+        raise HTTPException(400, "Generate the voice track first")
+    return start_job(p, "plan", phases.generate_plan)
+
+
 @app.get("/api/projects/{project_id}/job")
 def read_job(project_id: str) -> Job | None:
     get_project(project_id)
@@ -152,6 +165,50 @@ def stream_job(project_id: str) -> StreamingResponse:
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# -- the scene plan -------------------------------------------------------------------------------------
+class PlanBody(BaseModel):
+    plan: mv.VideoPlan
+
+
+class PromptBody(BaseModel):
+    prompt: str
+
+
+def plan_view(p: Project) -> dict:
+    plan = phases.load_plan(p)
+    items = phases.load_items(p)
+    return {
+        "plan": plan.model_dump() if plan else None,
+        "segments": [s.to_dict() for s in phases.load_segments(p)],
+        "items": items,
+        "too_long": [it["index"] for it in items if len(it["prompt"]) > mv.MAX_PROMPT_CHARS],
+    }
+
+
+@app.get("/api/projects/{project_id}/plan")
+def read_plan(project_id: str) -> dict:
+    return plan_view(get_project(project_id))
+
+
+@app.put("/api/projects/{project_id}/plan")
+def put_plan(project_id: str, body: PlanBody) -> dict:
+    p = get_project(project_id)
+    if not phases.load_segments(p):
+        raise HTTPException(400, "Generate the plan first")
+    phases.rebuild_prompts(p, body.plan, phases.pinned_prompts(p) | {})
+    return plan_view(p)
+
+
+@app.put("/api/projects/{project_id}/prompts/{index}")
+def put_prompt(project_id: str, index: int, body: PromptBody) -> dict:
+    p = get_project(project_id)
+    try:
+        phases.pin_prompt(p, index, body.prompt)
+    except KeyError:
+        raise HTTPException(404, "No such step")
+    return plan_view(p)
 
 
 # -- files ----------------------------------------------------------------------------------------

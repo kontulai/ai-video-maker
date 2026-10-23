@@ -171,3 +171,168 @@ def test_run_twice_is_409(client, monkeypatch):
     assert client.get(f"/api/projects/{pid}").json()["job"]["status"] == "running"
     gate.set()
     wait_job(client, pid)
+
+
+# -- phase 3: the scene plan ------------------------------------------------------------------
+from test_pipeline import SCRIPT  # noqa: E402
+import re  # noqa: E402
+from server import phases  # noqa: E402
+
+
+def make_voice(client, tmp_path, monkeypatch, pid, text=SCRIPT):
+    """Run the voice job against a fake ElevenLabs so the project has alignment.json."""
+    alignment = fake_alignment(text)
+    mp3 = tmp_path / "fake_voice.mp3"
+    if not mp3.exists():
+        secs = alignment["character_end_times_seconds"][-1] + 0.5
+        mv.ffmpeg("-f", "lavfi", "-i", f"sine=frequency=440:duration={secs}", str(mp3))
+
+    def fake_post(url, **kw):
+        body = {"audio_base64": base64.b64encode(mp3.read_bytes()).decode(), "alignment": alignment}
+        return SimpleNamespace(status_code=200, json=lambda: body, text="")
+    monkeypatch.setattr(mv.requests, "post", fake_post)
+    client.patch(f"/api/projects/{pid}", json={"talk_track": text})
+    assert client.post(f"/api/projects/{pid}/run/voice").status_code == 202
+    assert wait_job(client, pid)["status"] == "done"
+
+
+def fake_planner(seen):
+    """A Gemini that answers the planner with one shot per segment and two scenes."""
+    class FakeClient:
+        def __init__(self, **kw):
+            self.models = self
+
+        def generate_content(self, model, contents, config):
+            seen.append(contents)
+            text = contents if isinstance(contents, str) else contents[-1]
+            n = int(re.search(r"SEGMENTS \((\d+) segments", text).group(1))
+            shots = [mv.Shot(index=i, camera=f"camera {i}", action=f"action {i}", expression="calm",
+                             continuity=f"link {i}") for i in range(1, n + 1)]
+            scenes = [mv.ScenePlan(first_segment=1, cut=True)]
+            if n > 1:
+                scenes.append(mv.ScenePlan(first_segment=n // 2 + 1, cut=True, setting="The desk, close",
+                                           layout="Monitor frame-left, Ana centre", reason="next point"))
+            plan = mv.VideoPlan(title="Claims", visual_style="photoreal", setting="An office",
+                                lighting="soft window light", layout="Ana centre, monitor frame-right",
+                                characters=[mv.Character(name="Ana", appearance="dark hair", wardrobe="navy blazer")],
+                                scenes=scenes, shots=shots)
+            return SimpleNamespace(parsed=plan, text=plan.model_dump_json())
+    return FakeClient
+
+
+def planned_project(client, tmp_path, monkeypatch, with_preview=True):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    client.patch(f"/api/projects/{pid}", json={"description": "An office."})
+    if with_preview:
+        monkeypatch.setattr(google.genai, "Client", fake_image_client([]))
+        client.post(f"/api/projects/{pid}/run/preview")
+        assert wait_job(client, pid)["status"] == "done"
+    make_voice(client, tmp_path, monkeypatch, pid, text=SCRIPT + " " + SCRIPT)  # ~37 s: four steps or more
+    seen = []
+    monkeypatch.setattr(google.genai, "Client", fake_planner(seen))
+    assert client.post(f"/api/projects/{pid}/run/plan").status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "done", job
+    return pid, seen
+
+
+def no_gemini(monkeypatch):
+    class Boom:
+        def __init__(self, **kw):
+            raise AssertionError("Gemini must not be called")
+    monkeypatch.setattr(google.genai, "Client", Boom)
+
+
+def test_plan_job_builds_items_with_image(client, tmp_path, monkeypatch):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    assert client.post(f"/api/projects/{pid}/run/plan").status_code == 400   # no voice yet
+    assert client.get(f"/api/projects/{pid}/plan").json() == {"plan": None, "segments": [], "items": [],
+                                                              "too_long": []}
+    pid, seen = planned_project(client, tmp_path, monkeypatch)
+    part, text = seen[0]
+    assert part.inline_data.mime_type == "image/png" and "attached picture" in text
+    data = client.get(f"/api/projects/{pid}/plan").json()
+    n = len(data["segments"])
+    assert n >= 2 and len(data["items"]) == n and len(data["plan"]["shots"]) == n
+    assert data["plan"]["title"] == "Claims"
+    assert all(it["source_prompt"] == it["prompt"] and it["pinned_for"] == "" for it in data["items"])
+    assert data["segments"][-1]["scene"] == 2 and data["items"][-1]["scene"] == 2
+    assert "action 1" in data["items"][0]["prompt"] and "navy blazer" in data["items"][0]["prompt"]
+    assert data["too_long"] == []
+    p = client.get(f"/api/projects/{pid}").json()
+    assert p["plan"]["version"] == 1 and p["phases"]["plan"] == {"status": "ready", "reason": "",
+                                                                   "summary": "2 scenes"}
+    assert (tmp_path / pid / "plan.json").exists() and (tmp_path / pid / "segments.json").exists()
+
+
+def test_plan_job_without_preview_sends_text_only(client, tmp_path, monkeypatch):
+    pid, seen = planned_project(client, tmp_path, monkeypatch, with_preview=False)
+    assert isinstance(seen[0], str)
+
+
+def test_put_plan_rebuilds_without_gemini(client, tmp_path, monkeypatch):
+    pid, _ = planned_project(client, tmp_path, monkeypatch)
+    no_gemini(monkeypatch)
+    data = client.get(f"/api/projects/{pid}/plan").json()
+    before = [it["source_prompt"] for it in data["items"]]
+    plan = data["plan"]
+    plan["shots"][1]["action"] = "Ana lifts the receipt to the light"
+    r = client.put(f"/api/projects/{pid}/plan", json={"plan": plan})
+    assert r.status_code == 200
+    after = [it["source_prompt"] for it in r.json()["items"]]
+    assert after[1] != before[1] and "lifts the receipt" in after[1]
+    assert [a for i, a in enumerate(after) if i != 1] == [b for i, b in enumerate(before) if i != 1]
+    assert client.get(f"/api/projects/{pid}").json()["plan"]["version"] == 2
+    # a scene break can move: the second scene now starts one step later
+    plan["scenes"][1]["first_segment"] += 1
+    segs = client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).json()["segments"]
+    assert [s["scene"] for s in segs].index(2) == plan["scenes"][1]["first_segment"] - 1
+    assert client.put(f"/api/projects/{pid}/plan", json={"plan": {"title": "x"}}).status_code == 422
+
+
+def test_pinned_prompt_survives_unrelated_edit_and_drops_on_its_shot_edit(client, tmp_path, monkeypatch):
+    pid, _ = planned_project(client, tmp_path, monkeypatch)
+    no_gemini(monkeypatch)
+    r = client.put(f"/api/projects/{pid}/prompts/1", json={"prompt": "HAND WRITTEN"})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert items[0]["prompt"] == "HAND WRITTEN" and items[0]["pinned_for"] != ""
+    assert items[0]["source_prompt"] != "HAND WRITTEN"
+    assert client.put(f"/api/projects/{pid}/prompts/99", json={"prompt": "x"}).status_code == 404
+    plan = client.get(f"/api/projects/{pid}/plan").json()["plan"]
+    plan["shots"][1]["camera"] = "tight close-up"
+    items = client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).json()["items"]
+    assert items[0]["prompt"] == "HAND WRITTEN"           # unrelated shot edit keeps the pin
+    plan["shots"][0]["camera"] = "wide shot"
+    items = client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).json()["items"]
+    assert items[0]["prompt"] == items[0]["source_prompt"] and items[0]["pinned_for"] == ""
+    assert "wide shot" in items[0]["prompt"]
+    # a bible edit drops every pin
+    client.put(f"/api/projects/{pid}/prompts/2", json={"prompt": "PINNED TWO"})
+    plan["lighting"] = "hard noon sun"
+    items = client.put(f"/api/projects/{pid}/plan", json={"plan": plan}).json()["items"]
+    assert items[1]["prompt"] == items[1]["source_prompt"] and items[1]["pinned_for"] == ""
+    assert "noon sun" in items[0]["prompt"]  # the take carries the bible; extensions do not
+
+
+def test_scene_fingerprints_bible_vs_shot(client, tmp_path, monkeypatch):
+    pid, _ = planned_project(client, tmp_path, monkeypatch)
+    no_gemini(monkeypatch)
+    base = phases.scene_fingerprints(projects.load(pid))
+    assert set(base) == {1, 2}
+    plan = client.get(f"/api/projects/{pid}/plan").json()["plan"]
+    last = len(plan["shots"])
+    plan["shots"][last - 1]["action"] = "Ana closes the laptop"
+    client.put(f"/api/projects/{pid}/plan", json={"plan": plan})
+    one = phases.scene_fingerprints(projects.load(pid))
+    assert one[1] == base[1] and one[2] != base[2]
+    plan["visual_style"] = "grainy 16mm"
+    client.put(f"/api/projects/{pid}/plan", json={"plan": plan})
+    both = phases.scene_fingerprints(projects.load(pid))
+    assert both[1] != one[1] and both[2] != one[2]
+    # the first frame belongs to scene 1 only
+    monkeypatch.setattr(google.genai, "Client", fake_image_client([]))
+    client.post(f"/api/projects/{pid}/run/preview")
+    wait_job(client, pid)
+    pic = phases.scene_fingerprints(projects.load(pid))
+    assert pic[1] != both[1] and pic[2] == both[2]
