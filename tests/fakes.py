@@ -56,9 +56,10 @@ class FakeGemini:
 
     def __init__(self, plan=None, omni: FakeInteractions | None = None, callouts=None,
                  image: bytes | None = None, in_frame: str = "Ana centre, bench frame-left",
-                 seen: list | None = None, revise=None):
+                 seen: list | None = None, revise=None, draft=None):
         self.plan, self.omni, self.callouts, self.image = plan, omni, callouts, image
         self.revise = revise  # revise(contents) -> PlanRevision answers feedback on the video
+        self.draft = draft  # draft(contents) -> TalkTrackDraft answers a talk track drafted from a PDF
         self.in_frame, self.seen = in_frame, [] if seen is None else seen
         self.checks = self.fits = self.images = 0
 
@@ -89,6 +90,9 @@ class FakeGemini:
         if schema is mv.PlanRevision:
             self.seen.append(contents)
             return _answer(self.revise(contents))
+        if schema is getattr(mv, "TalkTrackDraft", None):
+            self.seen.append(contents)
+            return _answer(self.draft(contents))
         if "IMAGE" in (getattr(config, "response_modalities", None) or []):
             self.images += 1
             self.seen.append(config.image_config.aspect_ratio)

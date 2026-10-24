@@ -61,6 +61,21 @@ def generate_preview(p: Project, log) -> None:
 
 
 # -- phase 2: talk track ----------------------------------------------------------------
+def draft_talk_track(p: Project, log, notes: str) -> None:
+    """Write the talk track from source.pdf in the project folder. The text is an input the
+    user edits, so it is saved without a new phase version, as a PATCH would."""
+    from google import genai
+
+    pdf = (projects.folder(p.id) / "source.pdf").read_bytes()
+    log(f"Drafting the talk track from the PDF ({len(pdf) // 1024} kB) with {mv.PROMPT_MODEL}...")
+    client = genai.Client(api_key=mv.require_env("GEMINI_API_KEY"))
+    text = mv.draft_talk_track(client, pdf, p.description, notes)
+    log(f"Drafted {len(text.split())} words.")
+    fresh = projects.load(p.id)
+    fresh.talk_track = text
+    projects.save(fresh)
+
+
 def generate_voice(p: Project, log) -> None:
     run = projects.folder(p.id)
     (run / "talk_track.txt").write_text(p.talk_track)

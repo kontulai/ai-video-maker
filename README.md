@@ -67,7 +67,9 @@ The phases of a project:
    regenerate until it looks right. The pictures go to the image model and to
    the planner, so the preview and the production bible match them. The chosen
    preview is the first frame of the video.
-2. **Talk track**: write the narration and generate the ElevenLabs voice.
+2. **Talk track**: write the narration, or upload a PDF and let Gemini draft it
+   (with notes on length, tone or what to cover), edit it, and generate the
+   ElevenLabs voice.
 3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
    edit any of them, move scene breaks, or edit the assembled prompts.
 4. **Video**: generate every scene, then regenerate any single scene or the

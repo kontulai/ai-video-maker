@@ -885,3 +885,35 @@ def test_reference_images_go_to_the_preview_and_the_planner(client, tmp_path, mo
 def test_without_references_the_planner_gets_only_the_preview(client, tmp_path, monkeypatch):
     pid, seen = planned_project(client, tmp_path, monkeypatch)
     assert image_parts(seen[0]) == [("image/png", tiny_png())]
+
+
+# -- talk track drafted from a PDF ------------------------------------------------------------
+def tiny_pdf() -> bytes:
+    return b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n"
+
+
+def test_talk_track_is_drafted_from_an_uploaded_pdf(client, tmp_path, monkeypatch):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    client.patch(f"/api/projects/{pid}", json={"description": "An office.", "talk_track": "old words"})
+    seen = []
+    gem = FakeGemini(seen=seen, draft=lambda contents: mv.TalkTrackDraft(talk_track="Filing a claim takes three steps."))
+    monkeypatch.setattr(google.genai, "Client", gem.client)
+    r = client.post(f"/api/projects/{pid}/run/draft", files={"file": ("guide.pdf", tiny_pdf(), "application/pdf")},
+                    data={"notes": "about one minute, friendly"})
+    assert r.status_code == 202, r.text
+    assert r.json()["phase"] == "draft"
+    assert wait_job(client, pid)["status"] == "done"
+    p = client.get(f"/api/projects/{pid}").json()
+    assert p["talk_track"] == "Filing a claim takes three steps."
+    assert (tmp_path / pid / "source.pdf").read_bytes() == tiny_pdf()
+    # Gemini got the document itself, the description and the notes
+    parts = [(c.inline_data.mime_type, bytes(c.inline_data.data)) for c in seen[0] if hasattr(c, "inline_data")]
+    assert parts == [("application/pdf", tiny_pdf())]
+    text = [c for c in seen[0] if isinstance(c, str)][0]
+    assert "An office." in text and "about one minute, friendly" in text
+
+
+def test_draft_accepts_only_pdfs(client):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    r = client.post(f"/api/projects/{pid}/run/draft", files={"file": ("guide.txt", b"hi", "text/plain")})
+    assert r.status_code == 415

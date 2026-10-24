@@ -50,9 +50,22 @@ export async function uploadReferences(id: string, files: File[]): Promise<Proje
   }
   return (await res.json()) as Project;
 }
+/** Starts the job that drafts the talk track from a PDF, following `notes` (length, tone, what to cover). */
+export async function draftTalkTrack(id: string, file: File, notes: string): Promise<Job> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("notes", notes);
+  const res = await fetch(`${base}/${id}/run/draft`, { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail ?? detail; } catch { /* no json body */ }
+    throw new ApiError(res.status, String(detail));
+  }
+  return (await res.json()) as Job;
+}
 export const deleteReference = (id: string, name: string) => request<Project>("DELETE", `${base}/${id}/references/${name}`);
 
-export type JobKind = "preview" | "voice" | "plan" | "video" | "overlays" | "preview-render" | "final";
+export type JobKind = "preview" | "draft" | "voice" | "plan" | "video" | "overlays" | "preview-render" | "final";
 export const runJob = (id: string, kind: JobKind, body?: unknown) => request<Job>("POST", `${base}/${id}/run/${kind}`, body ?? {});
 export const getJob = (id: string) => request<Job | null>("GET", `${base}/${id}/job`);
 export const jobStreamUrl = (id: string) => `${base}/${id}/job/stream`;

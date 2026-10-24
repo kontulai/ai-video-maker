@@ -1,10 +1,29 @@
-import { fileUrl, patchProject } from "../api";
+import { useRef, useState } from "react";
+import { draftTalkTrack, errorText, fileUrl, patchProject } from "../api";
 import type { PhaseProps } from "../pages/ProjectPage";
-import { RunButton, SavedTextarea, Stale } from "./common";
+import { RunButton, SavedTextarea, Stale, isRunning } from "./common";
 
 export default function TalkTrackPhase({ project, reload, setProject, goTo }: PhaseProps) {
+  const [pdf, setPdf] = useState<File | null>(null);
+  const [notes, setNotes] = useState("");
+  const [draftError, setDraftError] = useState("");
+  const picker = useRef<HTMLInputElement>(null);
   const save = async (talk_track: string) => setProject(await patchProject(project.id, { talk_track }));
   const words = project.talk_track.trim() ? project.talk_track.trim().split(/\s+/).length : 0;
+  const running = isRunning(project);
+  const drafting = running && project.job?.phase === "draft";
+  const draft = async () => {
+    if (!pdf) return;
+    setDraftError("");
+    try {
+      await draftTalkTrack(project.id, pdf, notes);
+      setPdf(null);
+      if (picker.current) picker.current.value = "";
+      await reload();
+    } catch (e) {
+      setDraftError(errorText(e));
+    }
+  };
   return (
     <>
       <div className="panel">
@@ -15,6 +34,19 @@ export default function TalkTrackPhase({ project, reload, setProject, goTo }: Ph
           <RunButton project={project} kind="voice" label={project.files.voice ? "Regenerate voice" : "Generate voice"} primary reload={reload} disabled={!project.talk_track.trim()} />
           {project.files.voice && <span className="muted">Regenerating makes the plan, video, overlays and final out of date.</span>}
         </div>
+      </div>
+      <div className="panel">
+        <h2>Draft it from a document <span className="muted" style={{ fontWeight: "normal", fontSize: 12 }}>Gemini writes the narration from a PDF; edit it above afterwards</span></h2>
+        <label htmlFor="pdf-input">Source document (PDF)</label>
+        <input id="pdf-input" ref={picker} type="file" accept="application/pdf,.pdf" disabled={running} onChange={(e) => setPdf(e.target.files?.[0] ?? null)} />
+        <label htmlFor="draft-notes">Notes for the writer</label>
+        <input id="draft-notes" type="text" value={notes} disabled={running} placeholder="about one minute, friendly, only the refund part..." onChange={(e) => setNotes(e.target.value)} style={{ width: "100%" }} />
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="primary" disabled={!pdf || running} onClick={() => void draft()}>Draft from the PDF</button>
+          {project.talk_track.trim() && <span className="muted">The draft replaces the talk track above.</span>}
+          {drafting && <span className="muted">Drafting the talk track from the PDF...</span>}
+        </div>
+        {draftError && <p className="error">{draftError}</p>}
       </div>
       {project.files.voice && (
         <div className="panel">

@@ -649,6 +649,46 @@ def scenes_from_plan(plan: VideoPlan, segments: list[Segment], max_scene: int) -
     return out
 
 
+class TalkTrackDraft(BaseModel):
+    talk_track: str = Field(description="The narration, as plain spoken prose.")
+
+
+DRAFT_INSTRUCTIONS = """You write the voice-over narration for a short training video from a source
+document. Rules:
+- Say what the document teaches, in the order a learner needs it; leave out boilerplate, legal
+  notes, tables of contents and references.
+- Spoken prose only: short sentences, plain words, contractions, second person ("you"). No
+  headings, bullets, numbering, markdown, stage directions, speaker labels or sound cues.
+- Everything written is read aloud: spell out what the voice should say (say "fifty percent",
+  not "50%"; say "for example", not "e.g.").
+- Open with one sentence that says what the viewer will learn and close with one that says
+  what to do next.
+- Length: about 150 to 220 words (one to one and a half minutes) unless the notes ask for
+  another length. Follow the notes wherever they say something else.
+Return only the narration."""
+
+
+def draft_talk_track(client, pdf: bytes, description: str, notes: str) -> str:
+    """Have Gemini write the narration from a PDF, for the video `description` describes,
+    following any `notes` (length, tone, what to cover)."""
+    from google.genai import types
+
+    user_msg = (f"VIDEO (setting and people, for context):\n{description.strip() or '(not described yet)'}\n\n"
+                f"NOTES FROM THE AUTHOR:\n{notes.strip() or '(none)'}\n\n"
+                "Write the narration from the attached document.")
+    resp = client.models.generate_content(
+        model=PROMPT_MODEL,
+        contents=[types.Part.from_bytes(data=pdf, mime_type="application/pdf"), user_msg],
+        config=types.GenerateContentConfig(
+            system_instruction=DRAFT_INSTRUCTIONS,
+            response_mime_type="application/json",
+            response_schema=TalkTrackDraft,
+        ),
+    )
+    draft = resp.parsed or TalkTrackDraft.model_validate_json(resp.text)
+    return draft.talk_track.strip()
+
+
 REFERENCES_NOTE = ("The attached reference pictures show the people, the place or the look wanted: "
                    "match their faces, builds, clothes, rooms, colours and style closely.")
 

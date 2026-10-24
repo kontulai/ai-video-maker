@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -187,6 +187,16 @@ def run_preview(project_id: str) -> Job:
     if not p.description.strip():
         raise HTTPException(400, "Describe the video first")
     return start_job(p, "preview", phases.generate_preview)
+
+
+@app.post("/api/projects/{project_id}/run/draft", status_code=202)
+def run_draft(project_id: str, file: UploadFile = File(...), notes: str = Form("")) -> Job:
+    """Draft the talk track from an uploaded PDF; the text lands in the project when the job is done."""
+    p = get_project(project_id)
+    if file.content_type != "application/pdf" and not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(415, "Only a PDF can be used to draft the talk track")
+    (projects.folder(p.id) / "source.pdf").write_bytes(file.file.read())
+    return start_job(p, "draft", lambda p, log: phases.draft_talk_track(p, log, notes))
 
 
 @app.post("/api/projects/{project_id}/run/voice", status_code=202)
