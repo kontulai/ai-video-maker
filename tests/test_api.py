@@ -592,6 +592,29 @@ def test_feedback_revision_keeps_the_shots_gemini_did_not_return(client, tmp_pat
     assert all(shots[i]["action"] == f"action {i}" for i in indexes[1:])  # a shot left out stays
 
 
+def test_each_scene_is_stitched_into_one_video(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    assert [s["video"] for s in video_view(client, pid)["scenes"]] == [None, None]
+    run_video(client, pid)
+    folder = projects.folder(pid)
+    scenes = video_view(client, pid)["scenes"]
+    assert [s["video"] for s in scenes] == ["clips/scene_01.mp4", "clips/scene_02.mp4"]
+    assert all((folder / s["video"]).exists() for s in scenes)
+    assert client.get(f"/api/projects/{pid}/files/clips/scene_02.mp4").status_code == 200
+    before = [(folder / s["video"]).stat().st_mtime_ns for s in scenes]
+    run_video(client, pid, scenes=[2])
+    scenes = video_view(client, pid)["scenes"]
+    after = [(folder / s["video"]).stat().st_mtime_ns for s in scenes]
+    assert after[0] == before[0] and after[1] != before[1]  # only the remade scene is stitched again
+    # A scene whose clip is gone has no video; one whose clips exist but whose file
+    # is missing (an older project) is stitched on the next job.
+    (folder / scenes[0]["steps"][0]["clip"]).unlink()
+    (folder / scenes[1]["video"]).unlink()
+    assert [s["video"] for s in video_view(client, pid)["scenes"]] == [None, None]
+    run_video(client, pid, scenes=[1])
+    assert all(s["video"] for s in video_view(client, pid)["scenes"])
+
+
 def test_pinning_prompt_marks_scene_stale(client, tmp_path, monkeypatch):
     pid, gem = video_project(client, tmp_path, monkeypatch)
     run_video(client, pid)

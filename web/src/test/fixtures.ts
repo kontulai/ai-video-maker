@@ -33,8 +33,8 @@ export function videoView(status: SceneView["status"] = "ready"): VideoView {
   const step = (index: number) => ({ index, start: 0, end: 4, duration: 4, clip: status === "missing" ? null : `clips/clip_${index}.mp4` });
   return {
     scenes: [
-      { number: 1, start: 0, end: 8, cut: true, steps: [step(1), step(2)], status },
-      { number: 2, start: 8, end: 16, cut: false, steps: [step(3), step(4)], status },
+      { number: 1, start: 0, end: 8, cut: true, steps: [step(1), step(2)], status, video: status === "missing" ? null : "clips/scene_01.mp4" },
+      { number: 2, start: 8, end: 16, cut: false, steps: [step(3), step(4)], status, video: status === "missing" ? null : "clips/scene_02.mp4" },
     ],
     rough_cut: status === "ready",
   };

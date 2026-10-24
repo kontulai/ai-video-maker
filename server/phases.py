@@ -221,10 +221,24 @@ class SceneView(BaseModel):
     cut: bool
     steps: list[SceneStep]
     status: Literal["missing", "stale", "older_footage", "ready"]
+    video: str | None = None  # the scene's clips stitched into one file, when they all exist
 
 
 def clip_name(index: int) -> str:
     return f"clips/clip_{index:02d}.mp4"
+
+
+def scene_name(number: int) -> str:
+    return f"clips/scene_{number:02d}.mp4"
+
+
+def scene_video(run: Path, number: int, steps: list[SceneStep]) -> str | None:
+    """The stitched scene file, when it exists and is newer than every clip in it."""
+    path = run / scene_name(number)
+    if any(s.clip is None for s in steps) or not path.exists():
+        return None
+    newest = max((run / s.clip).stat().st_mtime_ns for s in steps if s.clip)
+    return scene_name(number) if path.stat().st_mtime_ns >= newest else None
 
 
 def scene_status(p: Project) -> list[SceneView]:
@@ -253,7 +267,7 @@ def scene_status(p: Project) -> list[SceneView]:
         else:
             status = "ready"
         views.append(SceneView(number=n, start=group[0]["start"], end=group[-1]["end"], cut=cut,
-                               steps=steps, status=status))
+                               steps=steps, status=status, video=scene_video(run, n, steps)))
     return views
 
 
@@ -282,6 +296,8 @@ def generate_video(p: Project, log, scenes: list[int] | None = None, feedback: s
     state_path = clip_dir / "steps.json"
     state = read_json(state_path, {})
     pinned: dict[int, str] = {}
+    for n in targets:
+        _unlink(run / scene_name(n))
     for pos, it in enumerate(items):
         if int(it.get("scene", 1)) not in targets:
             continue
@@ -343,6 +359,10 @@ def _record_scenes(project_id: str, targets: list[int], log) -> None:
     run = projects.folder(project_id)
     prints = scene_fingerprints(fresh)
     views = scene_status(fresh)
+    for v in views:
+        if all(s.clip for s in v.steps) and v.video is None:
+            mv.concatenate([run / s.clip for s in v.steps], run, name=scene_name(v.number))
+            v.video = scene_name(v.number)
     for v in views:
         if v.number in targets and all(s.clip for s in v.steps):
             old, before = fresh.scenes.get(str(v.number)), fresh.scenes.get(str(v.number - 1))

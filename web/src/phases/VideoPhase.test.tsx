@@ -6,7 +6,7 @@ import VideoPhase from "./VideoPhase";
 vi.mock("../api", () => ({
   getVideo: vi.fn(),
   runJob: vi.fn(),
-  fileUrl: () => "",
+  fileUrl: (_id: string, name: string) => name,
   errorText: (e: unknown) => String(e),
 }));
 import { getVideo, runJob } from "../api";
@@ -18,6 +18,24 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getVideo).mockResolvedValue(videoView());
   vi.mocked(runJob).mockResolvedValue({ phase: "video", status: "running", log: [], error: "", started: "", finished: null, scenes: null });
+});
+
+describe("VideoPhase scenes", () => {
+  it("shows each scene as one video, not its clips", async () => {
+    const { container } = render(<VideoPhase {...props()} />);
+    await screen.findAllByText("Regenerate");
+    const sources = Array.from(container.querySelectorAll("video")).map((v) => v.getAttribute("src"));
+    expect(sources).toEqual(["clips/scene_01.mp4", "clips/scene_02.mp4", "rough_cut.mp4"]);
+    expect(screen.getAllByText(/2 steps/).length).toBe(2);
+  });
+
+  it("says when a scene has no video yet", async () => {
+    vi.mocked(getVideo).mockResolvedValue(videoView("missing"));
+    const { container } = render(<VideoPhase {...props()} />);
+    await screen.findAllByText("Generate");
+    expect(container.querySelectorAll("video").length).toBe(0);
+    expect(screen.getAllByText(/No video yet/).length).toBe(2);
+  });
 });
 
 describe("VideoPhase regeneration feedback", () => {

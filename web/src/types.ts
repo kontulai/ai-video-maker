@@ -146,6 +146,7 @@ export interface SceneView {
   cut: boolean;
   steps: SceneStep[];
   status: "missing" | "stale" | "older_footage" | "ready";
+  video: string | null; // the scene's clips stitched into one file, when they all exist
 }
 
 export interface VideoView {

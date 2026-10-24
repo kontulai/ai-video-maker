@@ -66,7 +66,7 @@ export default function VideoPhase({ project, reload, goTo }: PhaseProps) {
             <div className="scene-card" key={scene.number}>
               <div className="row">
                 <b>Scene {scene.number}</b>
-                <span className="muted">{fmtTime(scene.start)} to {fmtTime(scene.end)} · {scene.steps.length} clip{scene.steps.length === 1 ? "" : "s"} · {scene.number > 1 ? (scene.cut ? "cut" : "continued") : "first frame"}</span>
+                <span className="muted">{fmtTime(scene.start)} to {fmtTime(scene.end)} · {scene.steps.length} step{scene.steps.length === 1 ? "" : "s"} · {scene.number > 1 ? (scene.cut ? "cut" : "continued") : "first frame"}</span>
                 <span className={`status ${scene.status}`}>{busy ? "generating..." : STATUS[scene.status]}</span>
                 <span className="spacer" />
                 {scene.status === "missing" ? (
@@ -76,15 +76,15 @@ export default function VideoPhase({ project, reload, goTo }: PhaseProps) {
                 )}
               </div>
               {asking === scene.number && <FeedbackForm project={project} scenes={[scene.number]} whole={false} reload={reload} onClose={() => setAsking(null)} />}
-              <div className="clips">
-                {scene.steps.map((st) => st.clip ? (
-                  <div key={st.index}>
-                    <video controls preload="metadata" src={fileUrl(project.id, st.clip, v)} />
-                    <div className="muted" style={{ fontSize: 12 }}>Step {st.index} · {st.duration} s</div>
-                  </div>
-                ) : (
-                  <div key={st.index} className="muted" style={{ fontSize: 12, padding: 8, border: "1px dashed var(--line)", borderRadius: 6 }}>Step {st.index} · {st.duration} s · no clip yet</div>
-                ))}
+              {scene.video ? (
+                <video controls preload="metadata" src={fileUrl(project.id, scene.video, v)} style={{ width: "100%", maxWidth: 640, display: "block", marginTop: 8 }} />
+              ) : (
+                <div className="muted" style={{ fontSize: 12, padding: 8, marginTop: 8, border: "1px dashed var(--line)", borderRadius: 6 }}>
+                  No video yet{busy ? ": generating" : scene.steps.some((st) => st.clip) ? ": some of its steps are missing" : ""}.
+                </div>
+              )}
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                Steps {scene.steps.map((st) => `${st.index} (${st.duration} s)`).join(", ")}
               </div>
             </div>
           );

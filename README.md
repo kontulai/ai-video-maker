@@ -68,7 +68,7 @@ The phases of a project:
 3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
    edit any of them, move scene breaks, or edit the assembled prompts.
 4. **Video**: generate every scene, then regenerate any single scene or the
-   whole video; play the clips and the rough cut. Regenerating asks what was
+   whole video; each scene plays as one stitched video, plus the rough cut. Regenerating asks what was
    wrong or what should change: Gemini works the answer into that scene's shots
    (and into the production bible when the whole video is redone), the prompts
    are rebuilt and the clips made again. An empty answer rolls again with the
