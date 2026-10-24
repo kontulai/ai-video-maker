@@ -82,6 +82,18 @@ export const getVideo = (id: string) => request<VideoView>("GET", `${base}/${id}
 export const getOverlays = (id: string) => request<OverlaysView>("GET", `${base}/${id}/overlays`);
 export const putOverlays = (id: string, accent_color: string, overlays: Overlay[]) =>
   request<OverlaysView>("PUT", `${base}/${id}/overlays`, { accent_color, overlays });
+/** Stores a picture for an image overlay; the answer names its file in the project folder. */
+export async function uploadOverlayImage(id: string, file: File): Promise<{ image: string }> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`${base}/${id}/overlays/images`, { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail ?? detail; } catch { /* no json body */ }
+    throw new ApiError(res.status, String(detail));
+  }
+  return (await res.json()) as { image: string };
+}
 
 export function errorText(e: unknown): string {
   if (e instanceof ApiError) return e.detail;

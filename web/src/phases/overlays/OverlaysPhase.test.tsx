@@ -7,11 +7,12 @@ import OverlaysPhase from "./OverlaysPhase";
 vi.mock("../../api", () => ({
   getOverlays: vi.fn(),
   putOverlays: vi.fn(),
+  uploadOverlayImage: vi.fn(),
   runJob: vi.fn(),
   fileUrl: () => "about:blank",
   errorText: (e: unknown) => String(e),
 }));
-import { getOverlays, putOverlays, runJob } from "../../api";
+import { getOverlays, putOverlays, runJob, uploadOverlayImage } from "../../api";
 
 const view = (): OverlaysView => ({ accent_color: "#00ff00", overlays: [], words: [], segments: [], duration: 10 });
 const noop = () => undefined;
@@ -46,6 +47,19 @@ describe("OverlaysPhase", () => {
     rerender(<OverlaysPhase {...props(project({ job: job("preview-render", "done") }))} />);
     await waitFor(() => expect(putOverlays).toHaveBeenCalledTimes(1));
     // the editor was not remounted: the added overlay is still there
+    expect(screen.getByText("1 overlay")).toBeTruthy();
+  });
+
+  it("uploads a picture and adds it as an image overlay at the playhead", async () => {
+    vi.mocked(uploadOverlayImage).mockResolvedValue({ image: "overlays/img_1.png" });
+    render(<OverlaysPhase {...props()} />);
+    const input = await screen.findByLabelText(/Add picture/);
+    fireEvent.change(input, { target: { files: [new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" })] } });
+    await waitFor(() => expect(putOverlays).toHaveBeenCalled());
+    expect(uploadOverlayImage).toHaveBeenCalledWith("p1", expect.any(File));
+    const saved = vi.mocked(putOverlays).mock.calls[vi.mocked(putOverlays).mock.calls.length - 1][2];
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ kind: "image", image: "overlays/img_1.png", start: 0, scale: 1, rotation: 0 });
     expect(screen.getByText("1 overlay")).toBeTruthy();
   });
 

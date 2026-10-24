@@ -9,6 +9,7 @@ file drawn by libass), so it reads as part of the edit rather than a subtitle.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, asdict
 
@@ -196,9 +197,26 @@ class TimedCallout:
     row: int = 0    # bullet lists: this item's line, and how many lines the list has
     rows: int = 1
     list_name: str = ""
+    scale: float = 1.0      # multiplies the style's size
+    rotation: float = 0.0   # degrees, clockwise like CSS (ASS \frz counts the other way)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class TimedImage:
+    """A picture laid over the video by ffmpeg: `scale` 1 spans IMAGE_WIDTH of the frame."""
+    path: Path
+    position: str
+    start: float
+    end: float
+    scale: float = 1.0
+    rotation: float = 0.0   # degrees, clockwise
+
+
+IMAGE_WIDTH = 0.30
+IMAGE_FADE = 0.2
 
 
 def stack_bullets(timed: list[TimedCallout]) -> list[TimedCallout]:
@@ -344,6 +362,44 @@ def _text_on(hex_color: str) -> str:
     return "&H141414&" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "&HFFFFFF&"
 
 
+def _num(x: float) -> str:
+    return f"{x:g}"
+
+
+def _rad(deg: float) -> str:
+    return f"{math.radians(deg):.4f}"
+
+
+def image_filter_graph(images: list[TimedImage], width: int, height: int, ass: str | None,
+                       first_input: int = 2) -> str:
+    """An ffmpeg -filter_complex graph that lays each picture (ffmpeg inputs `first_input`
+    onwards, in order) over [0:v] at its position, size, angle and time, then burns the
+    subtitle file `ass` (a path relative to the working directory) on top; output [v]."""
+    mx, my = round(width * 0.06), round(height * 0.09)
+    place = {
+        "top-left": f"x={mx}:y={my}", "top-right": f"x=W-{mx}-w:y={my}",
+        "bottom-left": f"x={mx}:y=H-{my}-h", "bottom-right": f"x=W-{mx}-w:y=H-{my}-h",
+        "center": "x=(W-w)/2:y=(H-h)/2",
+    }
+    chains, last = [], "[0:v]"
+    for i, im in enumerate(images):
+        w = max(1, round(width * IMAGE_WIDTH * im.scale))
+        steps = ["format=rgba", f"scale={w}:-1"]
+        if im.rotation:
+            r = _rad(im.rotation)
+            steps.append(f"rotate={r}:ow=rotw({r}):oh=roth({r}):c=none")
+        fade = min(IMAGE_FADE, max(0.0, (im.end - im.start) / 3))
+        steps += [f"fade=t=in:st={im.start}:d={fade:g}:alpha=1",
+                  f"fade=t=out:st={max(im.start, im.end - fade):g}:d={fade:g}:alpha=1"]
+        chains.append(f"[{first_input + i}:v]{','.join(steps)}[i{i}]")
+        out = "[v]" if ass is None and i == len(images) - 1 else f"[v{i + 1}]"
+        chains.append(f"{last}[i{i}]overlay={place[im.position]}:enable='between(t,{im.start},{im.end})'{out}")
+        last = out
+    if ass is not None:
+        chains.append(f"{last}ass={ass}[v]")
+    return ";".join(chains)
+
+
 def _placement(position: str, w: int, h: int) -> tuple[int, int, int]:
     """(numpad alignment, x, y) for a position name."""
     mx, my = round(w * 0.06), round(h * 0.09)
@@ -364,12 +420,16 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
     def ev(layer: int, tags: str, text: str, style: str = "fx") -> str:
         return f"Dialogue: {layer},{start},{end},{style},,0,0,0,,{{{tags}}}{text}"
 
+    rot = -t.rotation  # the user's clockwise degrees, in ASS's counter-clockwise terms
+    org = f"\\org({x},{y})" if rot else ""   # every part of a turned graphic turns about its anchor
+    turn = f"{org}\\frz{_num(rot)}" if rot else ""
+
     if t.style == "slam":
-        size = round(base * (0.21 if len(t.text) <= 8 else 0.15))
+        size = round(base * (0.21 if len(t.text) <= 8 else 0.15) * t.scale)
         text = _ass_escape(t.text.upper())
-        common = (f"\\an{an}\\fn{heavy}\\b0\\fs{size}\\fsp2\\bord0"
-                  f"\\fscx175\\fscy175\\frz-7\\fad(0,220)"
-                  f"\\t(0,170,0.6,\\fscx94\\fscy94\\frz-3)\\t(170,280,\\fscx100\\fscy100)"
+        common = (f"\\an{an}\\fn{heavy}\\b0\\fs{size}\\fsp2\\bord0{org}"
+                  f"\\fscx175\\fscy175\\frz{_num(rot - 7)}\\fad(0,220)"
+                  f"\\t(0,170,0.6,\\fscx94\\fscy94\\frz{_num(rot - 3)})\\t(170,280,\\fscx100\\fscy100)"
                   f"\\t(280,{dur},\\fscx105\\fscy105)")
         sx, sy = round(size * 0.05), round(size * 0.07)
         return [
@@ -381,7 +441,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
         ]
 
     if t.style == "swipe":
-        size = round(base * 0.072)
+        size = round(base * 0.072 * t.scale)
         pad = round(size * 0.35)
         text = _ass_escape(t.text.upper())
         # Wipe the bar open from the anchored side.
@@ -394,13 +454,14 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
         else:
             clip0, clip1 = f"\\clip({x},0,{x},{h})", f"\\clip(0,0,{w},{h})"
             slide_from = x
+        tilt = f"{org}\\frz{_num(rot - 1)}"
         common = f"\\an{an}\\fn{font}\\b0\\fs{size}\\fsp3\\shad0\\fad(0,200)"
         return [
             # Accent bar sized exactly to the text (opaque box style), wiping in.
-            ev(0, f"{common}\\pos({x},{y})\\1c{ac}\\3c{ac}\\bord{pad}\\frz-1"
+            ev(0, f"{common}\\pos({x},{y})\\1c{ac}\\3c{ac}\\bord{pad}{tilt}"
                   f"{clip0}\\t(0,230,0.5,{clip1})", text, "box"),
-            # Label sliding in on top of the bar.
-            ev(1, f"{common}\\move({slide_from},{y},{x},{y},120,360)\\bord0\\frz-1{clip1}"
+            # Label sliding in on top of the bar (a turned label is not clipped to the upright bar).
+            ev(1, f"{common}\\move({slide_from},{y},{x},{y},120,360)\\bord0{tilt}{clip1 if not rot else ''}"
                   f"\\1c{_text_on(accent)}\\alpha&HFF&\\t(120,260,\\alpha&H00&)", text),
         ]
 
@@ -408,7 +469,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
         return _bullet(t, w, h, ac, font, ev)
 
     # reveal: letters appear one by one, the line drifts up, an accent bar grows under it.
-    size = round(base * 0.09)
+    size = round(base * 0.09 * t.scale)
     step = max(25, min(60, 700 // max(1, len(t.text))))
     reveal_ms = step * len(t.text) + 140
     letters = "".join(
@@ -416,7 +477,7 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
         for i, ch in enumerate(t.text)
     )
     drift = round(h * 0.015)
-    common = (f"\\an{an}\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250)"
+    common = (f"\\an{an}\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250){turn}"
               f"\\t(0,{dur},\\fscx104\\fscy104)")
     off = max(2, round(size * 0.04))
     return [
@@ -425,14 +486,14 @@ def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: 
               f"\\1c&H000000&\\alpha&HFF&\\t(0,{reveal_ms},\\alpha&H60&)"
               f"\\blur{round(size * 0.15)}", _ass_escape(t.text)),
         ev(1, f"{common}\\move({x},{y + drift},{x},{y},0,400)\\1c&HFFFFFF&", letters),
-        _underline(an, x, y, size, t.text, ac, h, ev),
+        _underline(an, x, y, size, t.text, ac, h, ev, turn),
     ]
 
 
 def _bullet(t: TimedCallout, w: int, h: int, ac: str, font: str, ev) -> list[str]:
     """One line of a stacked list: an accent marker pops in, the text slides in after it."""
     base = min(w, h)
-    size = round(base * 0.07)
+    size = round(base * 0.07 * t.scale)
     line_h = round(size * 1.5)
     mx, my = round(w * 0.06), round(h * 0.09)
     if t.position == "bottom-left":
@@ -445,13 +506,14 @@ def _bullet(t: TimedCallout, w: int, h: int, ac: str, font: str, ev) -> list[str
     tx = mx + mark + round(size * 0.45)
     text = _ass_escape(t.text)
     square = f"m 0 0 l {mark} 0 {mark} {mark} 0 {mark}"
-    common = f"\\an4\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250)"
+    turn = f"\\org({tx},{cy})\\frz{_num(-t.rotation)}" if t.rotation else ""
+    common = f"\\an4\\fn{font}\\b0\\fs{size}\\fsp1\\bord0\\shad0\\fad(0,250){turn}"
     slide = round(size * 0.8)
     off = max(2, round(size * 0.05))
     return [
         # Accent marker: pops in, spinning from 45 degrees to square.
-        ev(1, f"\\an5\\pos({mx + mark // 2},{cy})\\bord0\\shad0\\1c{ac}\\fad(0,250)"
-              f"\\fscx0\\fscy0\\frz45\\t(0,220,0.6,\\fscx115\\fscy115\\frz0)"
+        ev(1, f"\\an5\\pos({mx + mark // 2},{cy})\\bord0\\shad0\\1c{ac}\\fad(0,250){turn}"
+              f"\\fscx0\\fscy0\\frz{_num(45 - t.rotation)}\\t(0,220,0.6,\\fscx115\\fscy115\\frz{_num(-t.rotation)})"
               f"\\t(220,320,\\fscx100\\fscy100)\\p1", f"{square}{{\\p0}}"),
         # Soft shadow, then the text, both sliding in from behind the marker.
         ev(0, f"{common}\\move({tx - slide + off},{cy + off},{tx + off},{cy + off},80,380)"
@@ -462,7 +524,7 @@ def _bullet(t: TimedCallout, w: int, h: int, ac: str, font: str, ev) -> list[str
     ]
 
 
-def _underline(an: int, x: int, y: int, size: int, text: str, ac: str, h: int, ev) -> str:
+def _underline(an: int, x: int, y: int, size: int, text: str, ac: str, h: int, ev, turn: str = "") -> str:
     """Accent bar under a 'reveal' graphic, growing from the anchored side."""
     width = round(len(text) * size * 0.5)  # approximate text width; it is a design accent
     thick = max(4, round(size * 0.09))
@@ -476,7 +538,7 @@ def _underline(an: int, x: int, y: int, size: int, text: str, ac: str, h: int, e
     left = x if an in (7, 1) else (x - width if an in (9, 3) else x - width // 2)
     origin = left if an in (7, 1) else (left + width if an in (9, 3) else left + width // 2)
     shape = f"m 0 0 l {width} 0 {width} {thick} 0 {thick}"
-    return ev(1, f"\\an7\\pos({left},{top})\\bord0\\shad0\\1c{ac}\\fad(0,250)"
+    return ev(1, f"\\an7\\pos({left},{top})\\bord0\\shad0\\1c{ac}\\fad(0,250){turn}"
                  f"\\clip({origin},0,{origin},{h})\\t(150,520,0.5,\\clip({left},0,{left + width},{h}))"
                  f"\\p1", f"{shape}{{\\p0}}")
 

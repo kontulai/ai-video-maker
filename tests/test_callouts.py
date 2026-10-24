@@ -149,3 +149,31 @@ def test_ass_has_every_style_and_accent_color():
     assert ass.count("Dialogue:") == 7 + 2 * 3
     assert "\\fnAvenir Next Heavy" in ass and "\\b1" not in ass  # exact faces, no faux bold
     assert "0:00:02.50" in ass
+
+
+def test_scale_and_rotation_change_the_text_tags():
+    plain = fx.write_ass([fx.TimedCallout("Free", "swipe", "bottom-left", 0, 2)], 1280, 720, "#FFC400")
+    big = fx.write_ass([fx.TimedCallout("Free", "swipe", "bottom-left", 0, 2, scale=2.0)], 1280, 720, "#FFC400")
+    assert f"\\fs{round(720 * 0.072)}" in plain and f"\\fs{round(720 * 0.072 * 2)}" in big
+    turned = fx.write_ass([fx.TimedCallout("Free", "swipe", "bottom-left", 0, 2, rotation=10)], 1280, 720, "#FFC400")
+    assert "\\frz-11" in turned and "\\frz-1" in plain          # the style's own tilt plus the user's turn
+    reveal = fx.write_ass([fx.TimedCallout("Feel it", "reveal", "top-right", 0, 2, rotation=-20)], 1280, 720, "#FFC400")
+    events = [l for l in reveal.splitlines() if l.startswith("Dialogue:")]
+    assert all("\\frz20" in l and "\\org(" in l for l in events)  # text, shadow and underline turn together
+    bullets = fx.write_ass([fx.TimedCallout("Fast", "bullet", "top-left", 0, 2, rotation=5)], 1280, 720, "#FFC400")
+    assert bullets.count("\\org(") == 3
+
+
+def test_image_filter_graph_places_scales_rotates_and_times_pictures():
+    imgs = [fx.TimedImage(Path("a.png"), "top-right", 1.0, 4.0),
+            fx.TimedImage(Path("b.png"), "center", 2.0, 5.5, scale=0.5, rotation=90)]
+    graph = fx.image_filter_graph(imgs, 1280, 720, ass="callouts.ass")
+    chains = graph.split(";")
+    assert chains[0].startswith("[2:v]") and "scale=384:-1" in chains[0]        # 30 % of the width
+    assert "[3:v]" in graph and "scale=192:-1" in graph                           # half of that
+    assert "rotate=" not in chains[0] and f"rotate={fx._rad(90)}" in graph        # straight pictures are not rotated
+    assert "between(t,1.0,4.0)" in graph and "between(t,2.0,5.5)" in graph
+    assert "x=W-77-w:y=65" in graph                                               # top-right, inside the margins
+    assert "x=(W-w)/2:y=(H-h)/2" in graph
+    assert graph.rstrip().endswith("ass=callouts.ass[v]")
+    assert fx.image_filter_graph(imgs[:1], 1280, 720, ass=None).rstrip().endswith("[v]") and "ass=" not in fx.image_filter_graph(imgs[:1], 1280, 720, ass=None)

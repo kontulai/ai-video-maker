@@ -161,8 +161,11 @@ export type Style = (typeof STYLES)[number];
 export const POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right", "center"] as const;
 export type Position = (typeof POSITIONS)[number];
 
+export type OverlayKind = "text" | "image";
+
 export interface Overlay {
   id: string;
+  kind: OverlayKind;
   text: string;
   style: Style;
   position: Position;
@@ -172,7 +175,17 @@ export interface Overlay {
   anchor: string;
   segment_index: number | null;
   edited: boolean;
+  /** Text: multiplies the style's size. Image: 1 spans IMAGE_WIDTH of the frame. 0.1 to 5. */
+  scale: number;
+  /** Degrees clockwise, -180 to 180. */
+  rotation: number;
+  /** Image overlays: the picture's file in the project folder, overlays/img_1.png. */
+  image: string;
 }
+
+export const MIN_SCALE = 0.1, MAX_SCALE = 5;
+/** An image overlay at scale 1 spans this share of the frame width, like callouts.IMAGE_WIDTH. */
+export const IMAGE_WIDTH = 0.3;
 
 export interface Word {
   text: string;

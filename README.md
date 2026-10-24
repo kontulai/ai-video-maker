@@ -79,8 +79,10 @@ The phases of a project:
    are rebuilt and the clips made again. An empty answer rolls again with the
    same prompts.
 5. **Overlays**: Gemini suggests keyword graphics over the rough cut; edit them
-   in a video editor with a timeline (add, move, retime, restyle, delete);
-   "Render preview" burns them with ffmpeg for an exact check.
+   in a video editor with a timeline (add, move, retime, restyle, resize,
+   rotate, delete), and lay your own pictures (PNG, JPEG, WebP) over the
+   video the same way; "Render preview" burns them with ffmpeg for an exact
+   check.
 6. **Final**: burn the overlays, lay the voice over the picture, download.
 
 A phase whose inputs changed since it ran is marked stale with the phase to

@@ -6,3 +6,15 @@ class StubResizeObserver { observe() {} unobserve() {} disconnect() {} }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = StubResizeObserver;
 
 afterEach(cleanup);
+
+// jsdom has no PointerEvent either: without one, fired pointer events carry no coordinates.
+if (typeof globalThis.PointerEvent === "undefined") {
+  class PolyPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  (globalThis as unknown as { PointerEvent: unknown }).PointerEvent = PolyPointerEvent;
+}

@@ -1267,20 +1267,31 @@ def write_callouts_ass(callout_data: dict, alignment: dict, segments: list[Segme
 
 
 def add_voice(video: Path, audio: Path, run: Path, overlay: Path | None = None,
-              name: str = "final.mp4") -> Path:
+              name: str = "final.mp4", images: Sequence[fx.TimedImage] = ()) -> Path:
+    """Lay the voice over the video; burn the subtitle file `overlay` and lay the pictures
+    `images` over the frame when given."""
     out = run / name
     tail = 0.5  # keep a little picture after the last word
     length = min(media_duration(video), media_duration(audio) + tail)
-    if overlay is None:
+    inputs: list[str] = []
+    vmap = ["-map", "0:v:0"]
+    encode = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    if overlay is None and not images:
         log("Adding voice track...")
         vcodec = ["-c:v", "copy"]
-    else:
+    elif not images:
         log("Adding voice track and keyword graphics...")
         # The ass filter path is relative to cwd (avoids escaping issues in filter syntax).
-        vcodec = ["-vf", f"ass={overlay.name}", "-c:v", "libx264", "-preset", "medium",
-                  "-crf", "18", "-pix_fmt", "yuv420p"]
-    ffmpeg("-i", str(video.resolve()), "-i", str(audio.resolve()),
-           "-map", "0:v:0", "-map", "1:a:0", *vcodec, "-c:a", "aac", "-b:a", "192k",
+        vcodec = ["-vf", f"ass={overlay.name}", *encode]
+    else:
+        log(f"Adding voice track, {len(images)} picture(s)" + (" and keyword graphics..." if overlay else "..."))
+        for im in images:
+            inputs += ["-loop", "1", "-i", str(im.path.resolve())]
+        graph = fx.image_filter_graph(list(images), *video_size(video), ass=overlay.name if overlay else None)
+        vmap = ["-filter_complex", graph, "-map", "[v]"]
+        vcodec = encode
+    ffmpeg("-i", str(video.resolve()), "-i", str(audio.resolve()), *inputs,
+           *vmap, "-map", "1:a:0", *vcodec, "-c:a", "aac", "-b:a", "192k",
            "-t", f"{length:.3f}", "-movflags", "+faststart", str(out.resolve()),
            cwd=run)
     return out

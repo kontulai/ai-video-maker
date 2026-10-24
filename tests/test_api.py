@@ -917,3 +917,42 @@ def test_draft_accepts_only_pdfs(client):
     pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/run/draft", files={"file": ("guide.txt", b"hi", "text/plain")})
     assert r.status_code == 415
+
+
+def test_overlay_pictures_are_uploaded_and_drawn_with_scale_and_rotation(client, tmp_path, monkeypatch):
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    r = client.post(f"/api/projects/{pid}/overlays/images", files=[("file", ("logo.png", tiny_png(), "image/png"))])
+    assert r.status_code == 200, r.text
+    assert r.json() == {"image": "overlays/img_1.png"}
+    assert client.get(f"/api/projects/{pid}/files/overlays/img_1.png").content == tiny_png()
+    r = client.post(f"/api/projects/{pid}/overlays/images", files=[("file", ("logo.jpg", tiny_jpeg(), "image/jpeg"))])
+    assert r.json() == {"image": "overlays/img_2.jpg"}
+    assert client.post(f"/api/projects/{pid}/overlays/images", files=[("file", ("x.txt", b"no", "text/plain"))]).status_code == 415
+
+    ovs = [overlay(id="t", text="BIG", style="swipe", position="top-left", start=1.0, end=3.0, scale=1.5, rotation=-8),
+           {"id": "i", "kind": "image", "image": "overlays/img_1.png", "position": "bottom-right", "start": 0.5, "end": 4.0,
+            "scale": 2.0, "rotation": 15, "text": "", "style": "swipe", "list_name": "", "anchor": "", "segment_index": None, "edited": True},
+           overlay(id="old", text="OLD", start=5.0, end=6.0)]  # no scale, rotation or kind: an overlay saved before this version
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": ovs}).status_code == 200
+    got = {o["id"]: o for o in overlays_view(client, pid)["overlays"]}
+    assert got["t"]["kind"] == "text" and got["t"]["scale"] == 1.5 and got["t"]["rotation"] == -8
+    assert got["i"]["kind"] == "image" and got["i"]["image"] == "overlays/img_1.png"
+    assert got["old"]["kind"] == "text" and got["old"]["scale"] == 1.0 and got["old"]["rotation"] == 0.0
+
+    job = run_phase(client, pid, "preview-render")
+    assert any("picture" in line for line in job["log"])
+    ass = (projects.folder(pid) / "callouts.ass").read_text()
+    big = [l for l in ass.splitlines() if "BIG" in l]
+    assert big and all(f"\\fs{round(min(*mv.video_size(projects.folder(pid) / 'rough_cut.mp4')) * 0.072 * 1.5)}" in l for l in big)
+    assert "\\frz7" in ass                      # the swipe's own -1 degree tilt plus the 8 degrees back
+    assert "img_1" not in ass                   # pictures are drawn by ffmpeg, not by the subtitle renderer
+    assert (projects.folder(pid) / "overlay_preview.mp4").exists()
+
+
+def test_a_missing_overlay_picture_is_skipped_with_a_note(client, tmp_path, monkeypatch):
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    ovs = [{**overlay(id="i", start=0.5, end=2.0), "kind": "image", "image": "overlays/gone.png"}]
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": ovs}).status_code == 200
+    job = run_phase(client, pid, "preview-render")
+    assert any("gone.png" in line for line in job["log"])
+    assert (projects.folder(pid) / "overlay_preview.mp4").exists()

@@ -114,16 +114,16 @@ export default function Timeline({ duration, t, words, segments, overlays, selec
             {overlays.map((o) => (
               <div
                 key={o.id}
-                className={`tl-block overlay ${o.style} ${o.id === selected ? "selected" : ""}`}
+                className={`tl-block overlay ${o.kind === "image" ? "image" : o.style} ${o.id === selected ? "selected" : ""}`}
                 style={{ left: px(o.start), width: Math.max(6, px(o.end - o.start)), top: 3 + (laneOf.get(o.id) ?? 0) * 26 }}
                 onPointerDown={(e) => down(e, o, "move")}
                 onPointerMove={move}
                 onPointerUp={up}
                 onClick={(e) => e.stopPropagation()}
-                title={`${o.text}  ${o.start.toFixed(2)}–${o.end.toFixed(2)}s`}
+                title={`${o.kind === "image" ? "picture" : o.text}  ${o.start.toFixed(2)}–${o.end.toFixed(2)}s`}
               >
                 <span className="tl-handle left" onPointerDown={(e) => down(e, o, "start")} onPointerMove={move} onPointerUp={up} />
-                <span className="tl-text">{o.text}</span>
+                <span className="tl-text">{o.kind === "image" ? "picture" : o.text}</span>
                 <span className="tl-handle right" onPointerDown={(e) => down(e, o, "end")} onPointerMove={move} onPointerUp={up} />
               </div>
             ))}

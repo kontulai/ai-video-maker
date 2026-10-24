@@ -334,6 +334,21 @@ def need_rough_cut(p: Project) -> None:
         raise HTTPException(400, "Generate the video first")
 
 
+@app.post("/api/projects/{project_id}/overlays/images")
+def add_overlay_image(project_id: str, file: UploadFile = File(...)) -> dict:
+    """Store a picture for an image overlay and return its project-relative name; the PUT
+    that places it bumps the phase. Names count up, so a replaced picture's name is never reused."""
+    p = get_project(project_id)
+    if file.content_type not in IMAGE_TYPES:
+        raise HTTPException(415, f"{file.filename}: only PNG, JPEG and WebP pictures can be overlaid")
+    folder = projects.folder(p.id) / "overlays"
+    folder.mkdir(exist_ok=True)
+    taken = [int(m.group(1)) for f in folder.iterdir() if (m := re.fullmatch(r"img_(\d+)\..*", f.name))]
+    name = f"overlays/img_{max(taken, default=0) + 1}{IMAGE_TYPES[file.content_type]}"
+    (projects.folder(p.id) / name).write_bytes(file.file.read())
+    return {"image": name}
+
+
 @app.get("/api/projects/{project_id}/overlays")
 def read_overlays(project_id: str) -> dict:
     return overlays_view(get_project(project_id))

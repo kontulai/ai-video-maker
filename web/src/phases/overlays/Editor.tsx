@@ -1,11 +1,11 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { errorText, fileUrl, putOverlays } from "../../api";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ChangeEvent } from "react";
+import { errorText, fileUrl, putOverlays, uploadOverlayImage } from "../../api";
 import type { Overlay, OverlaysView, Project } from "../../types";
 import { fmtTime } from "../common";
 import OverlayLayer from "./OverlayLayer";
 import SidePanel from "./SidePanel";
 import Timeline from "./Timeline";
-import { newId, newOverlay, round3 } from "./overlayModel";
+import { newId, newImageOverlay, newOverlay, round3 } from "./overlayModel";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
@@ -26,6 +26,7 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
   const [playing, setPlaying] = useState(false);
   const [save, setSave] = useState<SaveState>("saved");
   const [saveError, setSaveError] = useState("");
+  const [pictureError, setPictureError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
   const timer = useRef<number>();
   const latest = useRef({ accent, overlays });
@@ -70,11 +71,24 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
     setOverlays((os) => os.map((o) => (o.id === id ? { ...o, ...patch, edited: true } : o)));
     schedule();
   };
-  const add = () => {
-    const o = newOverlay(t, Math.max(1, Math.min(4, (view.duration || t + 4) - t)));
+  const place = (o: Overlay) => {
     setOverlays((os) => [...os, o].sort((a, b) => a.start - b.start));
     setSelected(o.id);
     schedule();
+  };
+  const spanAt = () => Math.max(1, Math.min(4, (view.duration || t + 4) - t));
+  const add = () => place(newOverlay(t, spanAt()));
+  const addPicture = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setPictureError("");
+    try {
+      const { image } = await uploadOverlayImage(project.id, file);
+      place(newImageOverlay(t, spanAt(), image));
+    } catch (err) {
+      setPictureError(errorText(err));
+    }
   };
   const duplicate = () => {
     const src = overlays.find((o) => o.id === selected);
@@ -133,7 +147,7 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
             onTimeUpdate={(e) => { if (!playing) setT(e.currentTarget.currentTime); }}
             onClick={toggle}
           />
-          <OverlayLayer overlays={overlays} t={t} accent={accent} selected={selected} onSelect={setSelected} onMove={(id, position) => update(id, { position })} />
+          <OverlayLayer overlays={overlays} t={t} accent={accent} selected={selected} projectId={project.id} onSelect={setSelected} onChange={update} />
         </div>
         <div className="row transport">
           <button onClick={toggle}>{playing ? "Pause" : "Play"}</button>
@@ -141,6 +155,11 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
           <button className="small" onClick={() => seek(t + 1)} title="Forward one second">+1 s</button>
           <span className="time">{fmtTime(t)} / {fmtTime(view.duration)}</span>
           <button className="primary" onClick={add}>Add overlay at {fmtTime(t)}</button>
+          <label className="file-button" title="Lay a PNG, JPEG or WebP picture over the video at the playhead">
+            Add picture
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => void addPicture(e)} />
+          </label>
+          {pictureError && <span className="error" style={{ fontSize: 12 }}>{pictureError}</span>}
           <span className="spacer" />
           <span className={save === "error" ? "error" : "muted"} style={{ fontSize: 12 }}>{saveText}</span>
           {save === "error" && <button className="small" onClick={() => void flush()}>Retry</button>}
@@ -148,7 +167,7 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
         <Timeline duration={view.duration} t={t} words={view.words} segments={view.segments} overlays={overlays} selected={selected}
           onSeek={seek} onSelect={setSelected} onRetime={(id, start, end) => update(id, { start, end })} />
       </div>
-      <SidePanel overlay={current} words={view.words} duration={view.duration} accent={accent}
+      <SidePanel overlay={current} words={view.words} duration={view.duration} accent={accent} projectId={project.id}
         onChange={(patch) => current && update(current.id, patch)} onAccent={changeAccent} onDuplicate={duplicate} onDelete={remove} />
     </div>
   );

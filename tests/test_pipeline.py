@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -300,3 +301,31 @@ def test_video_requests(tmp_path):
     assert text["text"].endswith("ACTION: x\nSTYLE: s\nSETTING: o")
     t2v = mv.video_request({**item, "step": 0}, "9:16", "720p", None, None)
     assert t2v["generation_config"]["video_config"]["task"] == "text_to_video"
+
+
+def _pixel(video: Path, t: float, x: int, y: int) -> tuple[int, int, int]:
+    raw = subprocess.run([mv.FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", str(t), "-i", str(video),
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True).stdout
+    w, _ = mv.video_size(video)
+    i = (y * w + x) * 3
+    return raw[i], raw[i + 1], raw[i + 2]
+
+
+def test_add_voice_overlays_pictures_in_place_and_time(tmp_path):
+    import callouts as fx
+    silent = tmp_path / "silent.mp4"
+    mv.ffmpeg("-f", "lavfi", "-i", "color=c=green:s=320x180:r=24:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(silent))
+    voice = tmp_path / "voice.mp3"
+    mv.ffmpeg("-f", "lavfi", "-i", "sine=frequency=500:duration=4", str(voice))
+    logo = tmp_path / "logo.png"
+    mv.ffmpeg("-f", "lavfi", "-i", "color=c=red:s=40x40", "-frames:v", "1", str(logo))
+    img = fx.TimedImage(logo, "top-left", 0.0, 2.0)   # 30 % of 320 = 96 px wide, inside the 19/16 px margins
+    out = mv.add_voice(silent, voice, tmp_path, images=[img], name="pic.mp4")
+    assert abs(mv.media_duration(out) - 4) < 0.3
+    r, g, b = _pixel(out, 1.0, 40, 40)
+    assert r > 180 and g < 90, (r, g, b)              # the picture is drawn while it is on
+    r, g, b = _pixel(out, 3.0, 40, 40)
+    assert g > 120 and r < 90, (r, g, b)              # and gone after its end
+    r, g, b = _pixel(out, 1.0, 300, 170)
+    assert g > 120 and r < 90, (r, g, b)              # the rest of the frame is untouched

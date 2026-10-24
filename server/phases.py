@@ -224,7 +224,7 @@ def pinned_prompts(p: Project) -> dict[int, str]:
 # -- phase 4: the video, scene by scene --------------------------------------------------------------
 from typing import Literal  # noqa: E402
 
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 from .projects import SceneState  # noqa: E402
 
@@ -416,6 +416,10 @@ class Overlay(BaseModel):
     anchor: str = ""
     segment_index: int | None = None
     edited: bool = False
+    kind: Literal["text", "image"] = "text"
+    image: str = ""   # picture overlays: a file in the project folder, overlays/img_1.png
+    scale: float = Field(1.0, ge=0.1, le=5)    # text: multiplies the style's size; image: 1 = 30 % of the width
+    rotation: float = Field(0.0, ge=-180, le=180)   # degrees, clockwise
 
 
 def callouts_path(p: Project) -> Path:
@@ -492,16 +496,31 @@ def render(p: Project, log, name: str) -> Path:
     if not voice.exists():
         raise RuntimeError("Generate the voice track first.")
     accent, overlays = load_overlays(p)
+    texts = [o for o in overlays if o.kind == "text"]
+    pictures: list[fx.TimedImage] = []
+    for o in overlays:
+        if o.kind != "image":
+            continue
+        try:
+            path = projects.safe_file(p.id, o.image)
+        except ValueError:
+            path = None
+        if path is None or not path.is_file():
+            log(f"Skipping a picture overlay: {o.image or '(no file)'} is missing.")
+            continue
+        pictures.append(fx.TimedImage(path, o.position, o.start, o.end, o.scale, o.rotation))
     ass_path = None
-    if overlays:
-        timed = fx.stack_bullets([fx.TimedCallout(o.text, o.style, o.position, o.start, o.end, list_name=o.list_name)
-                                  for o in overlays])
+    if texts:
+        timed = fx.stack_bullets([fx.TimedCallout(o.text, o.style, o.position, o.start, o.end, list_name=o.list_name,
+                                                  scale=o.scale, rotation=o.rotation) for o in texts])
         width, height = mv.video_size(rough_cut)
         ass_path = run / "callouts.ass"
         ass_path.write_text(fx.write_ass(timed, width, height, accent or fx.DEFAULT_ACCENT,
                                          mv.CALLOUT_FONT, mv.CALLOUT_FONT_HEAVY))
-        log(f"Drawing {len(overlays)} keyword graphics.")
-    out = mv.add_voice(rough_cut, voice, run, overlay=ass_path, name=name)
+        log(f"Drawing {len(texts)} keyword graphics.")
+    if pictures:
+        log(f"Placing {len(pictures)} picture{'s' if len(pictures) != 1 else ''}.")
+    out = mv.add_voice(rough_cut, voice, run, overlay=ass_path, name=name, images=pictures)
     log(f"Saved {name}")
     if name == "final.mp4":
         _commit(p.id, "final")
