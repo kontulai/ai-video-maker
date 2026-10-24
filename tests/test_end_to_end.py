@@ -70,6 +70,15 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene, cu
                 shot = mv.Shot.model_validate_json(contents.partition("PLANNED SHOT:\n")[2])
                 shot = shot.model_copy(update={"action": "works at the bench frame-left"})
                 return SimpleNamespace(parsed=shot, text=shot.model_dump_json())
+            if "IMAGE" in (getattr(config, "response_modalities", None) or []):
+                calls["images"] = calls.get("images", 0) + 1
+                # A cut's opening frame is drawn in the style of the previous clip's last frame.
+                assert contents[-1].startswith(mv.STYLE_NOTE) and "SETTING: the lathe corner" in contents[-1]
+                assert contents[0].inline_data.mime_type == "image/png"
+                png = tmp_path / "frame.png"
+                mv.ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=32x32", "-frames:v", "1", str(png))
+                part = SimpleNamespace(text=None, inline_data=SimpleNamespace(mime_type="image/png", data=png.read_bytes()))
+                return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])
             assert config.response_schema is mv.VideoPlan
             assert f"scenes of at most\n{max_scene}s" in contents and ", scene " not in contents
             n = contents.count("\nSegment ")
@@ -98,7 +107,8 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene, cu
     prompts = json.loads((run / "prompts.json").read_text())
     assert [b["response_format"]["duration"] for b in omni.bodies] == [f"{p['duration']}s" for p in prompts]
     # Clip 1 starts from scratch. Within a scene each step extends the step before; a
-    # continued scene starts from the previous clip's last frame, a cut from nothing.
+    # continued scene starts from the previous clip's last frame, a cut from an opening
+    # frame drawn in the style of the footage so far.
     assert omni.task(0) == "text_to_video"
     for i, p in enumerate(prompts[1:], 1):
         if p["step"] > 0:
@@ -106,7 +116,9 @@ def test_full_pipeline_offline(tmp_path, monkeypatch, whole_scene, max_scene, cu
             assert omni.bodies[i]["previous_interaction_id"] == f"int-{i}"
         else:
             assert "previous_interaction_id" not in omni.bodies[i]
-            assert omni.task(i) == ("text_to_video" if p["cut"] else "image_to_video")
+            assert omni.task(i) == "image_to_video"
+            assert (run / "clips" / f"scenestart_{p['index']:02d}.png").exists() == bool(p["cut"])
+    assert calls.get("images", 0) == sum(1 for p in prompts if p["cut"])
     scenes = {p["scene"] for p in prompts}
     if cut:
         assert len(prompts) == 2 and [(p["scene"], p["step"], p["cut"]) for p in prompts] == \

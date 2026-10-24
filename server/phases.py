@@ -324,7 +324,8 @@ def generate_video(p: Project, log, scenes: list[int] | None = None, feedback: s
     for pos, it in enumerate(items):
         if int(it.get("scene", 1)) not in targets:
             continue
-        _unlink(run / clip_name(it["index"]), clip_dir / f"lastframe_{pos:02d}.png")
+        _unlink(run / clip_name(it["index"]), clip_dir / f"lastframe_{pos:02d}.png",
+                clip_dir / f"scenestart_{it['index']:02d}.png")
         state.pop(str(it["index"]), None)
         if it.get("pinned_for"):
             pinned[it["index"]] = it["prompt"]  # fitted to the footage when sent, kept as written after
@@ -344,7 +345,7 @@ def generate_video(p: Project, log, scenes: list[int] | None = None, feedback: s
     try:
         if work:
             mv.generate_clips(work, run, p.settings.aspect, p.settings.resolution, start_image=preview_path(p),
-                              text_retries=p.settings.text_retries, fit=True)
+                              text_retries=p.settings.text_retries, fit=True, references=reference_paths(p))
     finally:
         # generate_clips saves the fitted prompts of `work` only; write the whole list back.
         for it in items:

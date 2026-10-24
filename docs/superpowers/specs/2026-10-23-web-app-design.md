@@ -122,11 +122,12 @@ teaching points, so they get the most editing control.
    bible changes. The plan can also be regenerated from scratch.
 4. **Video.** "Generate all" makes every scene in order, as the CLI does today
    (a scene is a take plus extensions; the next scene continues from the last
-   frame or cuts; each clip is reviewed for lettering and the next prompt is
-   fitted to the footage). Each scene is a card with a thumbnail, its clips,
+   frame or cuts, opening on a frame the image model draws from the preview
+   image and the reference pictures so the look stays the same; each clip is
+   reviewed for lettering and the next prompt is fitted to the footage). Each scene is a card with a thumbnail, its clips,
    a status, a play button and a **Regenerate** button that redoes only that
    scene: the first take restarts from the previous scene's last frame (or as
-   a cut) and the scene's clips are replaced. Regenerating a scene marks the
+   a cut, on a freshly drawn opening frame) and the scene's clips are replaced. Regenerating a scene marks the
    scenes after it as "continued from older footage" but does not rerun them;
    the user decides. Staleness is **per scene**: each scene records the
    prompts it was made from, a plan edit marks only the scenes whose prompts

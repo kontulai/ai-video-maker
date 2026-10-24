@@ -62,6 +62,7 @@ class FakeGemini:
         self.draft = draft  # draft(contents) -> TalkTrackDraft answers a talk track drafted from a PDF
         self.in_frame, self.seen = in_frame, [] if seen is None else seen
         self.checks = self.fits = self.images = 0
+        self.image_requests: list = []  # the contents of each image request
 
     @property
     def client(self):
@@ -95,6 +96,7 @@ class FakeGemini:
             return _answer(self.draft(contents))
         if "IMAGE" in (getattr(config, "response_modalities", None) or []):
             self.images += 1
+            self.image_requests.append(contents)
             self.seen.append(config.image_config.aspect_ratio)
             part = SimpleNamespace(text=None, inline_data=SimpleNamespace(mime_type="image/png", data=self.image))
             return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])

@@ -302,6 +302,60 @@ def test_video_requests(tmp_path):
     assert text["text"].endswith("ACTION: x\nSTYLE: s\nSETTING: o")
     t2v = mv.video_request({**item, "step": 0}, "9:16", "720p", None, None)
     assert t2v["generation_config"]["video_config"]["task"] == "text_to_video"
+    # A cut that starts from a generated frame is told so, instead of "a new setup".
+    cut = {"index": 3, "duration": 7, "step": 0, "cut": True,
+           "prompt": f"{mv.take_header(7, 0, cut=True)}\nSETTING: the lathe corner\nACTION: y"}
+    assert "new setup of the same film" in cut["prompt"]
+    body = mv.video_request(cut, "16:9", "720p", None, frame)
+    assert body["generation_config"]["video_config"]["task"] == "image_to_video"
+    text = body["input"][1]["text"]
+    assert text.startswith("Single continuous 7-second shot from one film; no scene cuts. It starts exactly on the given first frame")
+    assert "new setup" not in text and text.endswith("\nSETTING: the lathe corner\nACTION: y")
+
+
+def test_scene_frame_prompt_is_the_shot_as_a_still():
+    prompt = (f"{mv.take_header(6, 0, cut=True)}\nSTYLE: flat 2D cartoon\nSETTING: the lathe corner\n"
+              f"LAYOUT (as the camera sees it): Ana frame-right\nCAMERA: medium\nACTION: Ana lifts the board\n"
+              f"{mv.NO_TEXT_LINE}\nAVOID: text, morphing")
+    still = mv.scene_frame_prompt({"prompt": prompt, "duration": 6, "cut": True})
+    assert still.startswith("The opening frame of this shot")
+    assert "Single continuous" not in still and "no scene cuts" not in still
+    for line in ("STYLE: flat 2D cartoon", "SETTING: the lathe corner", "LAYOUT (as the camera sees it): Ana frame-right",
+                 "ACTION: Ana lifts the board", mv.NO_TEXT_LINE, "AVOID: text, morphing"):
+        assert line in still
+
+
+def test_generate_scene_frame_draws_in_the_style_of_the_given_frame(tmp_path, monkeypatch):
+    import google.genai
+    anchor, ref, out = tmp_path / "preview.png", tmp_path / "ana.jpg", tmp_path / "scenestart_03.png"
+    anchor.write_bytes(b"anchor-png"); ref.write_bytes(b"ref-jpg")
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            self.models = self
+
+        def generate_content(self, model, contents, config):
+            seen["contents"], seen["aspect"] = contents, config.image_config.aspect_ratio
+            part = SimpleNamespace(text=None, inline_data=SimpleNamespace(mime_type="image/png", data=b"frame-png"))
+            return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])
+    monkeypatch.setattr(google.genai, "Client", FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    item = {"index": 3, "duration": 6, "step": 0, "cut": True,
+            "prompt": f"{mv.take_header(6, 0, cut=True)}\nSETTING: the lathe corner\nACTION: Ana lifts the board"}
+    assert mv.generate_scene_frame(item, "9:16", out, style=anchor, references=[ref]) == out
+    assert out.read_bytes() == b"frame-png" and seen["aspect"] == "9:16"
+    first, second, text = seen["contents"]
+    # The style anchor comes first, then the user's reference pictures, then the brief.
+    assert first.inline_data.data == b"anchor-png" and first.inline_data.mime_type == "image/png"
+    assert second.inline_data.data == b"ref-jpg" and second.inline_data.mime_type == "image/jpeg"
+    assert text.startswith(mv.STYLE_NOTE) and mv.REFERENCES_NOTE in text
+    assert "visual style" in mv.STYLE_NOTE and "cartoon" in mv.STYLE_NOTE
+    assert text.endswith(mv.scene_frame_prompt(item))
+    # Without reference pictures only the anchor and the brief are sent.
+    mv.generate_scene_frame(item, "9:16", out, style=anchor)
+    anchor_only, text = seen["contents"]
+    assert anchor_only.inline_data.data == b"anchor-png" and mv.REFERENCES_NOTE not in text
 
 
 def _pixel(video: Path, t: float, x: int, y: int) -> tuple[int, int, int]:

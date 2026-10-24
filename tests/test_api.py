@@ -432,7 +432,7 @@ def test_scene_fingerprints_bible_vs_shot(client, tmp_path, monkeypatch):
 def video_project(client, tmp_path, monkeypatch, cut=False):
     """A planned project whose Gemini and Omni are fakes, ready to make clips."""
     pid, _ = planned_project(client, tmp_path, monkeypatch, cut=cut)
-    gem = FakeGemini(omni=FakeInteractions())
+    gem = FakeGemini(omni=FakeInteractions(), image=tiny_png())
     monkeypatch.setattr(google.genai, "Client", gem.client)
     monkeypatch.setattr(mv, "POLL_SECONDS", 0)
     return pid, gem
@@ -498,6 +498,31 @@ def test_regenerate_one_scene_replaces_only_its_clips_and_flags_next(client, tmp
     run_video(client, pid2)
     run_video(client, pid2, scenes=[1])
     assert [s["status"] for s in video_view(client, pid2)["scenes"]] == ["ready", "ready"]
+
+
+def test_cut_scene_opens_on_a_frame_drawn_in_the_previews_style(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch, cut=True)
+    run_video(client, pid)
+    folder = projects.folder(pid)
+    scenes = video_view(client, pid)["scenes"]
+    first = scenes[1]["steps"][0]["index"]
+    start = folder / "clips" / f"scenestart_{first:02d}.png"
+    assert start.exists() and gem.images == 1
+    # The frame is drawn from the preview (the style anchor) plus the shot, and the cut
+    # starts on it instead of from the prompt alone.
+    preview = (folder / client.get(f"/api/projects/{pid}").json()["current_preview"]).read_bytes()
+    anchor, brief = gem.image_requests[0]
+    assert anchor.inline_data.data == preview and brief.startswith(mv.STYLE_NOTE)
+    assert "SETTING: The desk, close" in brief
+    body = gem.omni.bodies[first - 1]
+    assert body["generation_config"]["video_config"]["task"] == "image_to_video"
+    assert base64.b64decode(body["input"][0]["data"]) == start.read_bytes()
+    assert "It starts exactly on the given first frame" in body["input"][1]["text"]
+    # Remaking the scene draws its opening frame again.
+    before = start.stat().st_mtime_ns
+    time.sleep(0.01)
+    run_video(client, pid, scenes=[2])
+    assert gem.images == 2 and start.stat().st_mtime_ns != before
 
 
 def test_plan_edit_marks_its_scene_stale_and_generate_all_redoes_only_it(client, tmp_path, monkeypatch):

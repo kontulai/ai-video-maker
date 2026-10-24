@@ -9,8 +9,9 @@ Pipeline
      scenes that follow the narration (a new idea can start a new scene) and
      write a continuity-preserving prompt for each segment.
   5. Generate each scene with Gemini Omni 1.1 Flash: the first segment is a
-     new take (a cut to a new setup, or a continuation from the last frame of
-     the previous scene) and every later segment extends that same video.
+     new take (a cut to a new setup, opening on a frame the image model draws in
+     the film's style, or a continuation from the last frame of the previous
+     scene) and every later segment extends that same video.
   6. Concatenate the segments.
   7. Lay the voice track over the final video, with infomercial-style keyword
      graphics (chosen by Gemini) burned in.
@@ -728,21 +729,52 @@ def image_part(path: Path):
     return types.Part.from_bytes(data=path.read_bytes(), mime_type=image_mime(path))
 
 
+STYLE_NOTE = ("The first attached picture is a frame from this film. Draw the new frame in exactly "
+              "its visual style: the same medium (a cartoon stays the same cartoon, photoreal stays "
+              "photoreal), the same rendering, line, palette, lighting and level of detail, and the "
+              "same people with the same faces, hair and clothes. Show the setup described below, "
+              "not what that picture shows.")
+
+
 def generate_preview_image(description: str, aspect: str, out: Path,
                            references: Sequence[Path] = ()) -> Path:
     """Make a still that shows what the video will look like, in the given aspect ratio,
     with the same no-lettering rule the video prompts use. `references` are pictures of
     the people, place or style to match. Returns `out`."""
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
     prompt = (f"{description}\n\n{NO_TEXT_LINE}\n"
               "A still frame from a film, photoreal, no captions or lettering.")
     contents: str | list = prompt
     if references:
         contents = [*(image_part(r) for r in references), f"{REFERENCES_NOTE}\n\n{prompt}"]
     log(f"Generating a preview image with {IMAGE_MODEL}...")
+    return generate_image(contents, aspect, out)
+
+
+def scene_frame_prompt(item: dict) -> str:
+    """The image prompt for a shot's opening frame: the shot's own lines (bible, camera,
+    action, the no-lettering rule) without the take header, asked for as a still."""
+    _, _, rest = item["prompt"].partition("\n")
+    return ("The opening frame of this shot, a single still from the film: the moment before "
+            f"anything moves, framed as the camera line says.\n{rest}")
+
+
+def generate_scene_frame(item: dict, aspect: str, out: Path, style: Path,
+                         references: Sequence[Path] = ()) -> Path:
+    """Draw the opening frame of a scene that cuts to a new setup, in the style of `style`
+    (a frame of this film: the preview or the footage so far) and, when given, matching
+    the people and places in `references`. Returns `out`."""
+    notes = [STYLE_NOTE] + ([REFERENCES_NOTE] if references else [])
+    contents = [image_part(style), *(image_part(r) for r in references),
+                "\n".join(notes) + f"\n\n{scene_frame_prompt(item)}"]
+    log(f"Drawing the opening frame of clip {item.get('index', '?')} with {IMAGE_MODEL}...")
+    return generate_image(contents, aspect, out)
+
+
+def generate_image(contents, aspect: str, out: Path) -> Path:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
     resp = client.models.generate_content(
         model=IMAGE_MODEL,
         contents=contents,
@@ -923,8 +955,12 @@ def video_request(item: dict, aspect: str, resolution: str, previous_id: str | N
         mime = "image/png" if first_frame.suffix.lower() == ".png" else "image/jpeg"
         image = {"type": "image", "mime_type": mime,
                  "data": base64.b64encode(first_frame.read_bytes()).decode()}
-        prompt = (item["prompt"] if item.get("step", 0) == 0
-                  else as_fresh_take(item["prompt"], item["duration"], item.get("bible", "")))
+        if item.get("step", 0) > 0:
+            prompt = as_fresh_take(item["prompt"], item["duration"], item.get("bible", ""))
+        elif item.get("cut"):
+            prompt = as_fresh_take(item["prompt"], item["duration"])  # on the frame, not "a new setup"
+        else:
+            prompt = item["prompt"]
         body["input"] = [image, {"type": "text", "text": prompt}]
         task = "image_to_video"
     else:
@@ -1133,11 +1169,14 @@ def cast_list(items: list[dict]) -> str:
 
 def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                    start_image: Path | None, retries: int = 3,
-                   text_retries: int = 2, fit: bool = True) -> list[Path]:
+                   text_retries: int = 2, fit: bool = True,
+                   references: Sequence[Path] = ()) -> list[Path]:
     """Make one clip per segment. Each scene is a single Omni video: its first segment
     is a new take and every later segment extends it, so people, props and the room
     carry over. A new scene either starts from the last frame of the previous clip or,
-    when the planner cut to a new setup, from the prompt alone.
+    when the planner cut to a new setup, from an opening frame drawn by the image model
+    in the style of `start_image` (else of the footage so far) and of the `references`,
+    so the look does not drift from scene to scene.
 
     After each clip Gemini watches it and reports what its last frame shows; the next
     prompt is rewritten to match that (`fit`), because the plan was written before any
@@ -1163,6 +1202,19 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
         if i == 0:
             return start_image
         return extract_last_frame(paths[i - 1], clip_dir / f"lastframe_{i:02d}.png")
+
+    def scene_frame(i: int, item: dict) -> Path | None:
+        """The opening frame of a cut, drawn in the film's style; kept beside the clips so
+        a --resume reuses it. None (a take from the prompt alone) when drawing fails."""
+        out = clip_dir / f"scenestart_{item['index']:02d}.png"
+        if out.exists():
+            return out
+        try:
+            return generate_scene_frame(item, aspect, out, start_image or last_frame(i), references)
+        except Exception as e:  # noqa: BLE001 - the image model is optional here
+            log(f"Could not draw the opening frame of clip {item['index']} ({e}); "
+                "starting the take from the prompt alone.")
+            return None
 
     def render(i: int, item: dict, previous_id: str | None, scene_len: float,
                frame: Path | None, required: bool = True) -> bool:
@@ -1252,7 +1304,9 @@ def generate_clips(items: list[dict], run: Path, aspect: str, resolution: str,
                 f"over Omni's {MAX_SCENE_SECONDS}s; starting a new take from the last frame.")
             previous_id, scene_len = None, 0.0
         frame = None
-        if not previous_id and not cut:
+        if cut:
+            frame = scene_frame(i, item)
+        elif not previous_id:
             if item.get("step", 0) > 0 and str(items[i - 1]["index"]) not in state:
                 log(f"No saved interaction to extend for clip {item['index']}; "
                     "starting a new take from the previous clip's last frame.")
