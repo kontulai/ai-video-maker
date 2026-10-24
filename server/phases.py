@@ -79,9 +79,11 @@ def draft_talk_track(p: Project, log, notes: str) -> None:
 def generate_voice(p: Project, log) -> None:
     run = projects.folder(p.id)
     (run / "talk_track.txt").write_text(p.talk_track)
+    voice = p.settings.voice_id
+    log(f"Narrator: {p.settings.voice_name or voice or 'the default voice'}.")
     with _keep_old(run / "voice.mp3", run / "alignment.json"):
-        audio, _alignment = mv.generate_voice(p.talk_track, run)
-    _commit(p.id, "voice", voice_seconds=round(mv.media_duration(audio), 2))
+        audio, _alignment = mv.generate_voice(p.talk_track, run, voice)
+    _commit(p.id, "voice", voice_seconds=round(mv.media_duration(audio), 2), voice_made_with=voice)
 
 
 # -- phase 3: the scene plan --------------------------------------------------------------------

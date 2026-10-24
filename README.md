@@ -36,6 +36,7 @@ Useful options:
 |---|---|
 | `--scene-file F`, `--script-file F` | Read inputs from files instead of asking. |
 | `--start-image img.png` | Use an image as the first frame of clip 1, to lock in the character's look. |
+| `--voice-id ID` | ElevenLabs narrator voice (default: `ELEVENLABS_VOICE_ID`). |
 | `--aspect 9:16` | Vertical video. |
 | `--max-scene S` | Longest scene in seconds, 10 to 30 (default `30`, the longest Omni will extend one video to). Shorter forces more scene breaks. |
 | `--resolution R` | `360p`, `720p` (default), `1080p` or `4k`. |
@@ -68,8 +69,10 @@ The phases of a project:
    the planner, so the preview and the production bible match them. The chosen
    preview is the first frame of the video.
 2. **Talk track**: write the narration, or upload a PDF and let Gemini draft it
-   (with notes on length, tone or what to cover), edit it, and generate the
-   ElevenLabs voice.
+   (with notes on length, tone or what to cover), edit it, pick the narrator
+   from the ElevenLabs voices in your account (with a preview clip), and
+   generate the voice. Changing the voice marks the track stale until it is
+   regenerated.
 3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
    edit any of them, move scene breaks, or edit the assembled prompts.
 4. **Video**: generate every scene, then regenerate any single scene or the

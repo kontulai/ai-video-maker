@@ -40,8 +40,6 @@ teaching points, so they get the most editing control.
 - More than one user, accounts, or deployment anywhere but the user's own
   machine.
 - Reusing characters or settings between projects.
-- Picking the ElevenLabs voice in the app. The voice stays an environment
-  variable, as today.
 - Editing the footage itself in the editor (trimming clips, reordering scenes).
   The editor is for overlays only.
 - Controls for aspect ratio or visual style in the setting phase. The user
@@ -101,9 +99,13 @@ teaching points, so they get the most editing control.
    `start_image` of the video phase, and it is also shown to the planner in
    phase 3 so the production bible describes the people and room in the
    picture rather than inventing others.
-2. **Talk track.** A text box and a generate button. Output: `voice.mp3` and
-   the word timings, with a player. Changing the text and regenerating makes
-   phases 3 to 6 stale.
+2. **Talk track.** A text box, a narrator picker and a generate button. The
+   picker lists the ElevenLabs account's voices (`GET /api/voices`) with a
+   preview clip; the choice is saved in the project settings as `voice_id`
+   and `voice_name`, and an empty id means `ELEVENLABS_VOICE_ID` from the
+   environment. Output: `voice.mp3` and the word timings, with a player.
+   Changing the text or the voice marks the voice track stale; regenerating
+   it makes phases 3 to 6 stale.
 3. **Scene plan.** A generate button runs the existing segmentation and
    planner. The page shows the production bible (style, setting, lighting,
    characters, layout), then each scene with its steps. For each step it shows

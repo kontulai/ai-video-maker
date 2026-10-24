@@ -1,5 +1,6 @@
 import json
 import subprocess
+import pytest
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -329,3 +330,68 @@ def test_add_voice_overlays_pictures_in_place_and_time(tmp_path):
     assert g > 120 and r < 90, (r, g, b)              # and gone after its end
     r, g, b = _pixel(out, 1.0, 300, 170)
     assert g > 120 and r < 90, (r, g, b)              # the rest of the frame is untouched
+
+
+# -- narrator voice ----------------------------------------------------------------------------
+def _fake_eleven(tmp_path, monkeypatch, seen):
+    """A fake ElevenLabs text-to-speech that records the URL it was called with."""
+    import base64
+    text = "Hello there."
+    mp3 = tmp_path / "fake.mp3"
+    mv.ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(mp3))
+
+    def fake_post(url, **kw):
+        seen.append(url)
+        body = {"audio_base64": base64.b64encode(mp3.read_bytes()).decode(), "alignment": fake_alignment(text)}
+        return SimpleNamespace(status_code=200, json=lambda: body, text="")
+    monkeypatch.setattr(mv.requests, "post", fake_post)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
+    return text
+
+
+def test_generate_voice_speaks_with_the_given_voice(tmp_path, monkeypatch):
+    seen = []
+    text = _fake_eleven(tmp_path, monkeypatch, seen)
+    run = tmp_path / "run"
+    run.mkdir()
+    mv.generate_voice(text, run, voice_id="abc123")
+    assert seen == ["https://api.elevenlabs.io/v1/text-to-speech/abc123/with-timestamps"]
+
+
+def test_generate_voice_falls_back_to_the_environment_voice(tmp_path, monkeypatch):
+    seen = []
+    text = _fake_eleven(tmp_path, monkeypatch, seen)
+    monkeypatch.setattr(mv, "ELEVEN_VOICE", "envvoice")
+    run = tmp_path / "run"
+    run.mkdir()
+    mv.generate_voice(text, run)                  # no voice given
+    mv.generate_voice(text, run / "x", voice_id="")  # empty means the default too
+    assert [u.split("/")[-2] for u in seen] == ["envvoice", "envvoice"]
+
+
+def test_list_voices_flattens_the_elevenlabs_response(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen["url"], seen["headers"] = url, kw["headers"]
+        body = {"voices": [
+            {"voice_id": "v1", "name": "Rachel", "category": "premade", "preview_url": "https://x/r.mp3",
+             "labels": {"accent": "american", "description": "calm", "age": "young", "gender": "female", "use_case": "narration"}},
+            {"voice_id": "v2", "name": "Own clone", "category": "cloned", "preview_url": None, "labels": {}, "description": "my voice"},
+        ]}
+        return SimpleNamespace(status_code=200, json=lambda: body, text="")
+    monkeypatch.setattr(mv.requests, "get", fake_get)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "key")
+    voices = mv.list_voices()
+    assert seen["url"] == "https://api.elevenlabs.io/v1/voices" and seen["headers"]["xi-api-key"] == "key"
+    assert voices == [
+        {"id": "v1", "name": "Rachel", "description": "female, young, american, calm, narration", "preview_url": "https://x/r.mp3"},
+        {"id": "v2", "name": "Own clone", "description": "my voice", "preview_url": None},
+    ]
+
+
+def test_list_voices_reports_api_errors(monkeypatch):
+    monkeypatch.setattr(mv.requests, "get", lambda url, **kw: SimpleNamespace(status_code=401, json=dict, text="bad key"))
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "key")
+    with pytest.raises(mv.ElevenLabsError, match="401"):
+        mv.list_voices()

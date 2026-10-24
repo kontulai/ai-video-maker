@@ -176,6 +176,44 @@ def test_failed_voice_regeneration_keeps_old_voice(client, tmp_path, monkeypatch
     assert p["voice"]["version"] == 1 and p["files"]["voice"] is True
 
 
+def test_voice_setting_picks_the_narrator_and_a_change_marks_the_voice_stale(client, tmp_path, monkeypatch):
+    text = "Submitting an expense claim takes three steps."
+    mp3 = tmp_path / "fake.mp3"
+    mv.ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(mp3))
+    seen = []
+
+    def fake_post(url, **kw):
+        seen.append(url)
+        body = {"audio_base64": base64.b64encode(mp3.read_bytes()).decode(), "alignment": fake_alignment(text)}
+        return SimpleNamespace(status_code=200, json=lambda: body, text="")
+    monkeypatch.setattr(mv.requests, "post", fake_post)
+
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    p = client.patch(f"/api/projects/{pid}", json={"talk_track": text, "settings": {"voice_id": "abc", "voice_name": "Bob"}}).json()
+    assert p["settings"]["voice_id"] == "abc" and p["settings"]["voice_name"] == "Bob"
+    assert client.post(f"/api/projects/{pid}/run/voice").status_code == 202
+    assert wait_job(client, pid)["status"] == "done"
+    assert seen == ["https://api.elevenlabs.io/v1/text-to-speech/abc/with-timestamps"]
+    p = client.get(f"/api/projects/{pid}").json()
+    assert p["phases"]["voice"]["status"] == "ready"
+    assert any("Bob" in line for line in client.get(f"/api/projects/{pid}/job").json()["log"])
+
+    p = client.patch(f"/api/projects/{pid}", json={"settings": {"voice_id": "def", "voice_name": "Eve"}}).json()
+    assert p["phases"]["voice"] == {"status": "stale", "reason": "the narrator voice changed", "summary": p["phases"]["voice"]["summary"]}
+    assert p["phases"]["plan"]["status"] == "empty"   # downstream only follows once the voice is remade
+    p = client.patch(f"/api/projects/{pid}", json={"settings": {"voice_id": "abc"}}).json()
+    assert p["phases"]["voice"]["status"] == "ready"
+
+
+def test_voices_route_lists_the_account_voices(client, monkeypatch):
+    body = {"voices": [{"voice_id": "v1", "name": "Rachel", "preview_url": "https://x/r.mp3", "labels": {"accent": "british"}}]}
+    monkeypatch.setattr(mv.requests, "get", lambda url, **kw: SimpleNamespace(status_code=200, json=lambda: body, text=""))
+    assert client.get("/api/voices").json() == [{"id": "v1", "name": "Rachel", "description": "british", "preview_url": "https://x/r.mp3"}]
+    monkeypatch.setattr(mv.requests, "get", lambda url, **kw: SimpleNamespace(status_code=401, json=dict, text="bad key"))
+    r = client.get("/api/voices")
+    assert r.status_code == 502 and "401" in r.json()["detail"]
+
+
 def test_run_twice_is_409(client, monkeypatch):
     import threading
     gate = threading.Event()

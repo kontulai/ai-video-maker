@@ -140,15 +140,41 @@ def require_env(name: str) -> str:
 # Step 3: voice track (ElevenLabs, with character timestamps)
 # ---------------------------------------------------------------------------
 
-def generate_voice(talk_track: str, run: Path) -> tuple[Path, dict]:
+class ElevenLabsError(RuntimeError):
+    pass
+
+
+def list_voices() -> list[dict]:
+    """The narrator voices the ElevenLabs account can use: id, name, a one-line description
+    (the voice's labels, or its own description) and a preview clip URL when there is one."""
+    resp = requests.get("https://api.elevenlabs.io/v1/voices",
+                        headers={"xi-api-key": require_env("ELEVENLABS_API_KEY")}, timeout=60)
+    if resp.status_code != 200:
+        raise ElevenLabsError(f"ElevenLabs error {resp.status_code}: {resp.text[:300]}")
+    first = ("gender", "age", "accent", "description", "descriptive", "use_case")
+    out = []
+    for v in resp.json().get("voices", []):
+        labels = v.get("labels") or {}
+        keys = [k for k in first if k in labels] + [k for k in labels if k not in first]
+        labels = [str(labels[k]) for k in keys if labels[k]]
+        out.append({"id": v["voice_id"], "name": v.get("name") or v["voice_id"],
+                    "description": ", ".join(labels) or (v.get("description") or ""),
+                    "preview_url": v.get("preview_url") or None})
+    return out
+
+
+def generate_voice(talk_track: str, run: Path, voice_id: str | None = None) -> tuple[Path, dict]:
+    """Speak the talk track with ElevenLabs; `voice_id` empty or None means ELEVENLABS_VOICE_ID."""
+    voice = voice_id or ELEVEN_VOICE
+    run.mkdir(parents=True, exist_ok=True)
     audio_path, align_path = run / "voice.mp3", run / "alignment.json"
     if audio_path.exists() and align_path.exists():
         log("Voice track already exists, skipping.")
         return audio_path, json.loads(align_path.read_text())
 
-    log(f"Generating voice track with ElevenLabs (voice {ELEVEN_VOICE}, model {ELEVEN_MODEL})...")
+    log(f"Generating voice track with ElevenLabs (voice {voice}, model {ELEVEN_MODEL})...")
     resp = requests.post(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE}/with-timestamps",
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice}/with-timestamps",
         params={"output_format": "mp3_44100_128"},
         headers={"xi-api-key": require_env("ELEVENLABS_API_KEY"),
                  "Content-Type": "application/json"},
@@ -1351,6 +1377,8 @@ def main() -> None:
     ap.add_argument("--script-file", help="Read the talk track from a file instead of asking.")
     ap.add_argument("--start-image", type=Path,
                     help="Optional PNG/JPEG used as the first frame of clip 1 (locks the character's look).")
+    ap.add_argument("--voice-id", default="", metavar="ID",
+                    help="ElevenLabs narrator voice (default: ELEVENLABS_VOICE_ID from the environment).")
     ap.add_argument("--aspect", default="16:9", choices=["16:9", "9:16"])
     ap.add_argument("--resolution", default="720p", choices=["360p", "720p", "1080p", "4k"],
                     help="1080p and 4k are upscaled by Omni (default: 720p).")
@@ -1384,7 +1412,7 @@ def main() -> None:
                           args.script_file)
 
     # 3: voice
-    audio, alignment = generate_voice(talk, run)
+    audio, alignment = generate_voice(talk, run, args.voice_id)
     duration = media_duration(audio)
 
     # 4: segments + prompts

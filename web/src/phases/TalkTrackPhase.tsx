@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { draftTalkTrack, errorText, fileUrl, patchProject } from "../api";
 import type { PhaseProps } from "../pages/ProjectPage";
 import { RunButton, SavedTextarea, Stale, isRunning } from "./common";
+import VoicePicker from "./VoicePicker";
 
 export default function TalkTrackPhase({ project, reload, setProject, goTo }: PhaseProps) {
   const [pdf, setPdf] = useState<File | null>(null);
@@ -30,6 +31,7 @@ export default function TalkTrackPhase({ project, reload, setProject, goTo }: Ph
         <h2>2. Talk track</h2>
         <p className="muted">The words the narrator speaks, exactly as they should be said. About 2.5 words a second: {words} words is roughly {Math.round(words / 2.5)} seconds.</p>
         <SavedTextarea value={project.talk_track} onSave={save} rows={10} placeholder="Welcome to the workshop. Today we..." />
+        <VoicePicker project={project} setProject={setProject} disabled={running} />
         <div className="row">
           <RunButton project={project} kind="voice" label={project.files.voice ? "Regenerate voice" : "Generate voice"} primary reload={reload} disabled={!project.talk_track.trim()} />
           {project.files.voice && <span className="muted">Regenerating makes the plan, video, overlays and final out of date.</span>}

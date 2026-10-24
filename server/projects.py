@@ -32,6 +32,8 @@ class Settings(BaseModel):
     max_scene: int = Field(30, ge=10, le=30)
     density: Literal["off", "low", "medium", "high"] = "medium"
     text_retries: int = Field(2, ge=0)
+    voice_id: str = ""    # ElevenLabs narrator voice; empty means ELEVENLABS_VOICE_ID from the environment
+    voice_name: str = ""  # what the picker showed for it
 
 
 class PhaseOutput(BaseModel):
@@ -54,6 +56,7 @@ class Project(BaseModel):
     description: str = ""
     talk_track: str = ""
     voice_seconds: float | None = None
+    voice_made_with: str = ""  # the settings.voice_id the current voice track was spoken with
     previews: list[str] = Field(default_factory=list)
     current_preview: str | None = None
     references: list[str] = Field(default_factory=list)  # refs/ref_N.png: pictures of the people, place or style
@@ -152,7 +155,9 @@ def phase_states(p: Project) -> dict[str, PhaseState]:
             states[name] = PhaseState(status="empty")
             continue
         changed = [up for up in UPSTREAM[name] if out.inputs.get(up) != p.phase(up).version]
-        if changed:
+        if name == "voice" and p.voice_made_with != p.settings.voice_id:
+            states[name] = PhaseState(status="stale", reason="the narrator voice changed")
+        elif changed:
             first = min(PHASE_NUMBER[up] for up in changed)
             states[name] = PhaseState(status="stale", reason=f"redo after {first}")
         else:

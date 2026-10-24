@@ -18,6 +18,17 @@ export interface Settings {
   max_scene: number;
   density: "off" | "low" | "medium" | "high";
   text_retries: number;
+  /** ElevenLabs narrator voice; empty means ELEVENLABS_VOICE_ID from the server's .env. */
+  voice_id: string;
+  voice_name: string;
+}
+
+/** A narrator voice the ElevenLabs account can use. */
+export interface Voice {
+  id: string;
+  name: string;
+  description: string;
+  preview_url: string | null;
 }
 
 export interface PhaseOutput {

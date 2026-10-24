@@ -70,6 +70,15 @@ def get_project(project_id: str) -> Project:
         raise HTTPException(404, "No such project")
 
 
+@app.get("/api/voices")
+def list_voices() -> list[dict]:
+    """The ElevenLabs narrator voices the account can use."""
+    try:
+        return mv.list_voices()
+    except (mv.ElevenLabsError, SystemExit, OSError) as e:
+        raise HTTPException(502, str(e) or "Could not reach ElevenLabs")
+
+
 # -- projects --------------------------------------------------------------------------------
 class NewProject(BaseModel):
     name: str

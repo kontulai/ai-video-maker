@@ -5,6 +5,7 @@ import TalkTrackPhase from "./TalkTrackPhase";
 
 vi.mock("../api", () => ({
   patchProject: vi.fn(),
+  listVoices: vi.fn(async () => []),
   draftTalkTrack: vi.fn(),
   runJob: vi.fn(),
   fileUrl: (_id: string, name: string) => name,
@@ -39,5 +40,12 @@ describe("TalkTrackPhase drafting from a PDF", () => {
     expect(screen.getByText(/replaces the talk track/i)).toBeTruthy();
     expect(screen.getByText(/drafting the talk track/i)).toBeTruthy();
     expect((screen.getByText("Draft from the PDF") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("TalkTrackPhase narrator voice", () => {
+  it("shows the voice picker next to the voice button", async () => {
+    render(<TalkTrackPhase {...props(project({ talk_track: "words" }))} />);
+    expect(await screen.findByLabelText(/narrator voice/i)).toBeTruthy();
   });
 });

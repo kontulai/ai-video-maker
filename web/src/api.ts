@@ -1,4 +1,4 @@
-import type { Job, OverlaysView, Overlay, PlanView, Project, VideoPlan, VideoView } from "./types";
+import type { Job, OverlaysView, Overlay, PlanView, Project, VideoPlan, VideoView, Voice } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -37,6 +37,8 @@ export const getProject = (id: string) => request<Project>("GET", `${base}/${id}
 export const patchProject = (id: string, patch: Partial<Pick<Project, "name" | "description" | "talk_track" | "current_preview">> & { settings?: Partial<Project["settings"]> }) =>
   request<Project>("PATCH", `${base}/${id}`, patch);
 export const deleteProject = (id: string) => request<void>("DELETE", `${base}/${id}`);
+/** The narrator voices the ElevenLabs account can use. */
+export const listVoices = () => request<Voice[]>("GET", "/api/voices");
 
 /** Attaches pictures of the people, place or style; the server names them refs/ref_N.ext. */
 export async function uploadReferences(id: string, files: File[]): Promise<Project> {
