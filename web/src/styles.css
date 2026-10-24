@@ -88,6 +88,9 @@ video { background: #000; border-radius: var(--radius); }
 .strip { display: flex; gap: 8px; flex-wrap: wrap; }
 .strip img { height: 110px; border: 2px solid transparent; border-radius: var(--radius); cursor: pointer; }
 .strip img.current { border-color: var(--accent); }
+.refs { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.refs figure { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: center; }
+.refs img { height: 90px; border-radius: var(--radius); border: 1px solid var(--line); }
 .scene-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-bottom: 10px; }
 .clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; }
 .clips video { width: 100%; }

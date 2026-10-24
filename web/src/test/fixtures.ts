@@ -7,7 +7,7 @@ export function project(over: Partial<Project> = {}): Project {
   return {
     id: "p1", name: "Demo", created: "", updated: "",
     settings: { aspect: "16:9", resolution: "720p", max_scene: 8, density: "medium", text_retries: 1 },
-    description: "", talk_track: "", voice_seconds: 10, previews: [], current_preview: null,
+    description: "", talk_track: "", voice_seconds: 10, previews: [], current_preview: null, references: [],
     setting: out, voice: out, plan: out, video: out, overlays: out, final: out, scenes: {},
     phases: { setting: ready, voice: ready, plan: ready, video: ready, overlays: ready, final: ready },
     job: null,

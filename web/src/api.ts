@@ -38,6 +38,20 @@ export const patchProject = (id: string, patch: Partial<Pick<Project, "name" | "
   request<Project>("PATCH", `${base}/${id}`, patch);
 export const deleteProject = (id: string) => request<void>("DELETE", `${base}/${id}`);
 
+/** Attaches pictures of the people, place or style; the server names them refs/ref_N.ext. */
+export async function uploadReferences(id: string, files: File[]): Promise<Project> {
+  const form = new FormData();
+  for (const f of files) form.append("files", f, f.name);
+  const res = await fetch(`${base}/${id}/references`, { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail ?? detail; } catch { /* no json body */ }
+    throw new ApiError(res.status, String(detail));
+  }
+  return (await res.json()) as Project;
+}
+export const deleteReference = (id: string, name: string) => request<Project>("DELETE", `${base}/${id}/references/${name}`);
+
 export type JobKind = "preview" | "voice" | "plan" | "video" | "overlays" | "preview-render" | "final";
 export const runJob = (id: string, kind: JobKind, body?: unknown) => request<Job>("POST", `${base}/${id}/run/${kind}`, body ?? {});
 export const getJob = (id: string) => request<Job | null>("GET", `${base}/${id}/job`);

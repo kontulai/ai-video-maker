@@ -56,6 +56,7 @@ class Project(BaseModel):
     voice_seconds: float | None = None
     previews: list[str] = Field(default_factory=list)
     current_preview: str | None = None
+    references: list[str] = Field(default_factory=list)  # refs/ref_N.png: pictures of the people, place or style
     setting: PhaseOutput = Field(default_factory=PhaseOutput)
     voice: PhaseOutput = Field(default_factory=PhaseOutput)
     plan: PhaseOutput = Field(default_factory=PhaseOutput)

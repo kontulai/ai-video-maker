@@ -805,3 +805,83 @@ def test_final_render_has_voice_and_bumps_final(client, tmp_path, monkeypatch):
     assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#FFC400", "overlays": []}).status_code == 200
     run_phase(client, pid, "final")
     assert audio_streams(final) == 1 and client.get(f"/api/projects/{pid}").json()["final"]["version"] == 2
+
+
+# -- reference images -----------------------------------------------------------------------------
+def tiny_jpeg() -> bytes:
+    return bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+
+
+def upload_refs(client, pid, *files):
+    return client.post(f"/api/projects/{pid}/references",
+                       files=[("files", (name, data, mime)) for name, data, mime in files])
+
+
+def test_reference_images_are_stored_listed_served_and_removed(client, tmp_path):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    r = upload_refs(client, pid, ("ana.png", tiny_png(), "image/png"), ("desk.jpg", tiny_jpeg(), "image/jpeg"))
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["references"] == ["refs/ref_1.png", "refs/ref_2.jpg"]
+    assert (tmp_path / pid / "refs" / "ref_1.png").read_bytes() == tiny_png()
+    assert client.get(f"/api/projects/{pid}/files/refs/ref_2.jpg").status_code == 200
+    # names keep counting up, so a removed picture's name is never reused
+    assert client.delete(f"/api/projects/{pid}/references/refs/ref_1.png").json()["references"] == ["refs/ref_2.jpg"]
+    assert not (tmp_path / pid / "refs" / "ref_1.png").exists()
+    assert upload_refs(client, pid, ("b.png", tiny_png(), "image/png")).json()["references"] == ["refs/ref_2.jpg", "refs/ref_3.png"]
+    assert client.delete(f"/api/projects/{pid}/references/refs/ref_9.png").status_code == 404
+    # only pictures are accepted
+    assert upload_refs(client, pid, ("notes.pdf", b"%PDF", "application/pdf")).status_code == 415
+
+
+def fake_image_client_seeing(seen):
+    """Like fake_image_client, but records the request contents as well."""
+    class FakeClient:
+        def __init__(self, **kw):
+            self.models = self
+
+        def generate_content(self, model, contents, config):
+            seen.append(contents)
+            part = SimpleNamespace(text=None, inline_data=SimpleNamespace(mime_type="image/png", data=tiny_png()))
+            return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])
+    return FakeClient
+
+
+def image_parts(contents) -> list[tuple[str, bytes]]:
+    """(mime, data) of every image part in a Gemini contents list."""
+    if isinstance(contents, str):
+        return []
+    out = []
+    for part in contents:
+        blob = getattr(part, "inline_data", None)
+        if blob is not None:
+            out.append((blob.mime_type, bytes(blob.data)))
+    return out
+
+
+def test_reference_images_go_to_the_preview_and_the_planner(client, tmp_path, monkeypatch):
+    pid = client.post("/api/projects", json={"name": "x"}).json()["id"]
+    client.patch(f"/api/projects/{pid}", json={"description": "An office."})
+    p = upload_refs(client, pid, ("ana.png", tiny_png(), "image/png"), ("desk.jpg", tiny_jpeg(), "image/jpeg")).json()
+    assert p["setting"]["version"] == 1  # new pictures are a new setting input
+    seen = []
+    monkeypatch.setattr(google.genai, "Client", fake_image_client_seeing(seen))
+    client.post(f"/api/projects/{pid}/run/preview")
+    assert wait_job(client, pid)["status"] == "done"
+    assert image_parts(seen[0]) == [("image/png", tiny_png()), ("image/jpeg", tiny_jpeg())]
+    text = [c for c in seen[0] if isinstance(c, str)]
+    assert len(text) == 1 and "reference" in text[0].lower() and "An office." in text[0]
+
+    make_voice(client, tmp_path, monkeypatch, pid, text=SCRIPT + " " + SCRIPT)
+    planner_seen = []
+    monkeypatch.setattr(google.genai, "Client", fake_planner(planner_seen))
+    client.post(f"/api/projects/{pid}/run/plan")
+    assert wait_job(client, pid)["status"] == "done"
+    # the preview (first frame) and both references, in that order
+    assert image_parts(planner_seen[0]) == [("image/png", tiny_png()), ("image/png", tiny_png()), ("image/jpeg", tiny_jpeg())]
+    assert "reference" in [c for c in planner_seen[0] if isinstance(c, str)][0].lower()
+
+
+def test_without_references_the_planner_gets_only_the_preview(client, tmp_path, monkeypatch):
+    pid, seen = planned_project(client, tmp_path, monkeypatch)
+    assert image_parts(seen[0]) == [("image/png", tiny_png())]

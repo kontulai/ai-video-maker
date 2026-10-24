@@ -33,7 +33,7 @@ import time
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
 import imageio_ffmpeg
 import requests
@@ -649,19 +649,37 @@ def scenes_from_plan(plan: VideoPlan, segments: list[Segment], max_scene: int) -
     return out
 
 
-def generate_preview_image(description: str, aspect: str, out: Path) -> Path:
+REFERENCES_NOTE = ("The attached reference pictures show the people, the place or the look wanted: "
+                   "match their faces, builds, clothes, rooms, colours and style closely.")
+
+
+def image_mime(path: Path) -> str:
+    return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(path.suffix.lower(), "image/png")
+
+
+def image_part(path: Path):
+    from google.genai import types
+    return types.Part.from_bytes(data=path.read_bytes(), mime_type=image_mime(path))
+
+
+def generate_preview_image(description: str, aspect: str, out: Path,
+                           references: Sequence[Path] = ()) -> Path:
     """Make a still that shows what the video will look like, in the given aspect ratio,
-    with the same no-lettering rule the video prompts use. Returns `out`."""
+    with the same no-lettering rule the video prompts use. `references` are pictures of
+    the people, place or style to match. Returns `out`."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
     prompt = (f"{description}\n\n{NO_TEXT_LINE}\n"
               "A still frame from a film, photoreal, no captions or lettering.")
+    contents: str | list = prompt
+    if references:
+        contents = [*(image_part(r) for r in references), f"{REFERENCES_NOTE}\n\n{prompt}"]
     log(f"Generating a preview image with {IMAGE_MODEL}...")
     resp = client.models.generate_content(
         model=IMAGE_MODEL,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
             image_config=types.ImageConfig(aspect_ratio=aspect),
@@ -677,10 +695,12 @@ def generate_preview_image(description: str, aspect: str, out: Path) -> Path:
 
 
 def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
-                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None) -> list[dict]:
+                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None,
+                 references: Sequence[Path] = ()) -> list[dict]:
     """Have Gemini write the production bible, group the steps into scenes and write one
     shot per step; returns one item per step with the prompt and the scene assignment.
-    With `image` (the first frame of the video) the bible describes what the picture shows."""
+    With `image` (the first frame of the video) the bible describes what the picture shows;
+    `references` are further pictures of the people, place or style to describe."""
     prompts_path = run / "prompts.json"
     if prompts_path.exists():
         log("Prompts already exist, skipping planning.")
@@ -704,12 +724,17 @@ SEGMENTS ({len(segments)} segments, {segments[-1].end}s in all; group them into 
 {max_scene}s each and write one shot for each segment):
 {seg_list}
 """
-    contents: str | list = user_msg
+    parts: list = []
     if image is not None:
-        user_msg += ("\nThe attached picture is the first frame of the video: describe its people, "
+        user_msg += ("\nThe first attached picture is the first frame of the video: describe its people, "
                      "room, light and style in the bible, do not invent others.\n")
-        mime = "image/jpeg" if image.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-        contents = [types.Part.from_bytes(data=image.read_bytes(), mime_type=mime), user_msg]
+        parts.append(image_part(image))
+    if references:
+        user_msg += (f"\nThe {'other ' if image is not None else ''}attached pictures are references: "
+                     "they show the people, the place or the look wanted. Describe them in the bible "
+                     "(faces, builds, clothes, room, colours, style) so the video matches them.\n")
+        parts.extend(image_part(r) for r in references)
+    contents: str | list = [*parts, user_msg] if parts else user_msg
     log(f"Planning {len(segments)} shots with {PROMPT_MODEL}...")
     resp = client.models.generate_content(
         model=PROMPT_MODEL,

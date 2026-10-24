@@ -58,6 +58,7 @@ export interface Project {
   voice_seconds: number | null;
   previews: string[];
   current_preview: string | null;
+  references: string[];
   setting: PhaseOutput;
   voice: PhaseOutput;
   plan: PhaseOutput;

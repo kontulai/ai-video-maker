@@ -45,11 +45,17 @@ def _keep_old(*paths: Path):
 
 
 # -- phase 1: setting -------------------------------------------------------------------
+def reference_paths(p: Project) -> list[Path]:
+    """The uploaded reference pictures that still exist, in upload order."""
+    run = projects.folder(p.id)
+    return [run / name for name in p.references if (run / name).is_file()]
+
+
 def generate_preview(p: Project, log) -> None:
     run = projects.folder(p.id)
     (run / "scene.txt").write_text(p.description)
     name = f"preview_{len(p.previews) + 1}.png"
-    mv.generate_preview_image(p.description, p.settings.aspect, run / name)
+    mv.generate_preview_image(p.description, p.settings.aspect, run / name, reference_paths(p))
     log(f"Preview saved: {name}")
     _commit(p.id, "setting", previews=[*p.previews, name], current_preview=name)
 
@@ -145,7 +151,7 @@ def generate_plan(p: Project, log) -> None:
     with _keep_old(run / "plan.json", run / "segments.json", run / "prompts.json"):
         write_json(run / "segments.json", [s.to_dict() for s in segments])
         items = mv.plan_prompts(p.description, p.talk_track, segments, run, p.settings.max_scene,
-                                image=preview_path(p))
+                                image=preview_path(p), references=reference_paths(p))
         for item in items:
             item["source_prompt"] = item["prompt"]
             item["pinned_for"] = ""

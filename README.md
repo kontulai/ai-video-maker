@@ -62,8 +62,11 @@ server on 8000) next to `python -m server`.
 
 The phases of a project:
 
-1. **Setting**: describe the video and generate a preview image; regenerate
-   until it looks right. The chosen image is the first frame of the video.
+1. **Setting**: describe the video, attach reference pictures of the people,
+   the place or the look (PNG, JPEG or WebP), and generate a preview image;
+   regenerate until it looks right. The pictures go to the image model and to
+   the planner, so the preview and the production bible match them. The chosen
+   preview is the first frame of the video.
 2. **Talk track**: write the narration and generate the ElevenLabs voice.
 3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
    edit any of them, move scene breaks, or edit the assembled prompts.

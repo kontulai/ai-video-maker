@@ -1,10 +1,12 @@
 """The HTTP API and, when web/dist exists, the built browser app."""
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -116,6 +118,43 @@ def patch_project(project_id: str, body: ProjectPatch) -> dict:
         if body.current_preview != p.current_preview:
             p.current_preview = body.current_preview
             projects.bump(p, "setting")
+    projects.save(p)
+    return view(p)
+
+
+IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+
+
+@app.post("/api/projects/{project_id}/references")
+def add_references(project_id: str, files: list[UploadFile] = File(...)) -> dict:
+    """Store pictures of the people, place or style; they go to the preview and the planner.
+    Names count up for the life of the project, so a removed picture's name is never reused."""
+    p = get_project(project_id)
+    for f in files:
+        if f.content_type not in IMAGE_TYPES:
+            raise HTTPException(415, f"{f.filename}: only PNG, JPEG and WebP pictures can be attached")
+    run = projects.folder(p.id)
+    (run / "refs").mkdir(exist_ok=True)
+    taken = [int(m.group(1)) for name in p.references if (m := re.search(r"ref_(\d+)\.", name))]
+    next_n = max(taken, default=0) + 1
+    for f in files:
+        name = f"refs/ref_{next_n}{IMAGE_TYPES[f.content_type]}"
+        (run / name).write_bytes(f.file.read())
+        p.references.append(name)
+        next_n += 1
+    projects.bump(p, "setting")
+    projects.save(p)
+    return view(p)
+
+
+@app.delete("/api/projects/{project_id}/references/{name:path}")
+def remove_reference(project_id: str, name: str) -> dict:
+    p = get_project(project_id)
+    if name not in p.references:
+        raise HTTPException(404, "No such reference picture")
+    p.references.remove(name)
+    phases._unlink(projects.folder(p.id) / name)
+    projects.bump(p, "setting")
     projects.save(p)
     return view(p)
 
