@@ -168,6 +168,7 @@ def run_plan(project_id: str) -> Job:
 
 class VideoBody(BaseModel):
     scenes: list[int] | None = None
+    feedback: str = ""  # what was wrong or should change; Gemini works it into the shots first
 
 
 @app.post("/api/projects/{project_id}/run/video", status_code=202)
@@ -179,7 +180,8 @@ def run_video(project_id: str, body: VideoBody | None = None) -> Job:
     scenes = body.scenes if body and body.scenes else None
     if scenes and set(scenes) - {v.number for v in views}:
         raise HTTPException(400, "No such scene")
-    return start_job(p, "video", lambda p, log: phases.generate_video(p, log, scenes), scenes=scenes)
+    feedback = body.feedback if body else ""
+    return start_job(p, "video", lambda p, log: phases.generate_video(p, log, scenes, feedback), scenes=scenes)
 
 
 @app.get("/api/projects/{project_id}/job")

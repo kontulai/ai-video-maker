@@ -512,6 +512,86 @@ def test_regenerate_one_scene_makes_no_other_missing_scene(client, tmp_path, mon
     assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
 
 
+def test_regenerate_with_feedback_revises_the_scenes_shots(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    scenes = video_view(client, pid)["scenes"]
+    indexes = [st["index"] for st in scenes[1]["steps"]]
+    made, seen = len(gem.omni.bodies), len(gem.seen)
+
+    def revise(contents):
+        asked = mv.ShotList.model_validate_json(contents.partition("SHOTS BEING REDONE:\n")[2].partition("\n\n")[0])
+        assert [s.index for s in asked.shots] == indexes  # only the scene being redone
+        return mv.PlanRevision(changes="Ana smiles", shots=[
+            s.model_copy(update={"action": f"Ana smiles while {s.action}"}) for s in asked.shots])
+    gem.revise = revise
+    body = {"scenes": [2], "feedback": "make Ana smile, she looks grim"}
+    assert client.post(f"/api/projects/{pid}/run/video", json=body).status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "done", job
+    assert len(gem.seen) == seen + 1 and "make Ana smile, she looks grim" in gem.seen[-1]
+    assert any("Ana smiles" in line for line in job["log"])
+    data = client.get(f"/api/projects/{pid}/plan").json()
+    shots = {s["index"]: s for s in data["plan"]["shots"]}
+    assert all(shots[i]["action"].startswith("Ana smiles while action") for i in indexes)
+    assert all(shots[i]["action"] == f"action {i}" for i in shots if i not in indexes)  # scene 1 untouched
+    assert data["plan"]["lighting"] == "soft window light"  # a single scene never changes the bible
+    assert all("Ana smiles" in it["prompt"] for it in data["items"] if it["index"] in indexes)
+    assert len(gem.omni.bodies) == made + len(indexes)
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+    assert client.get(f"/api/projects/{pid}").json()["plan"]["version"] == 2
+
+
+def test_regenerate_without_feedback_asks_gemini_nothing(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    seen = len(gem.seen)
+    gem.revise = lambda contents: pytest.fail("no revision wanted")
+    assert client.post(f"/api/projects/{pid}/run/video", json={"scenes": [1], "feedback": "  "}).status_code == 202
+    assert wait_job(client, pid)["status"] == "done"
+    assert len(gem.seen) == seen
+    assert client.get(f"/api/projects/{pid}").json()["plan"]["version"] == 1
+
+
+def test_regenerate_all_with_feedback_may_change_the_bible_and_redoes_every_scene(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    n = sum(len(s["steps"]) for s in video_view(client, pid)["scenes"])
+    made = len(gem.omni.bodies)
+
+    def revise(contents):
+        asked = mv.ShotList.model_validate_json(contents.partition("SHOTS BEING REDONE:\n")[2].partition("\n\n")[0])
+        assert len(asked.shots) == n and "PRODUCTION BIBLE" in contents
+        bible = mv.Bible.model_validate_json(contents.partition("PRODUCTION BIBLE:\n")[2].partition("\n\n")[0])
+        return mv.PlanRevision(changes="warmer light", shots=asked.shots, bible=bible.model_copy(update={"lighting": "warm desk lamps"}))
+    gem.revise = revise
+    assert client.post(f"/api/projects/{pid}/run/video", json={"feedback": "the light is too cold"}).status_code == 202
+    job = wait_job(client, pid)
+    assert job["status"] == "done", job
+    assert job["scenes"] is None
+    data = client.get(f"/api/projects/{pid}/plan").json()
+    assert data["plan"]["lighting"] == "warm desk lamps" and data["plan"]["title"] == "Claims"
+    assert all("warm desk lamps" in it["prompt"] for it in data["items"] if it["index"] == 1)
+    assert len(gem.omni.bodies) == made + n
+    assert [s["status"] for s in video_view(client, pid)["scenes"]] == ["ready", "ready"]
+
+
+def test_feedback_revision_keeps_the_shots_gemini_did_not_return(client, tmp_path, monkeypatch):
+    pid, gem = video_project(client, tmp_path, monkeypatch)
+    run_video(client, pid)
+    scenes = video_view(client, pid)["scenes"]
+    indexes = [st["index"] for st in scenes[1]["steps"]]
+    gem.revise = lambda contents: mv.PlanRevision(changes="x", shots=[
+        mv.Shot(index=indexes[0], camera="close-up", action="Ana laughs", expression="warm", continuity="link"),
+        mv.Shot(index=1, camera="hacked", action="hacked", expression="hacked", continuity="hacked")])
+    assert client.post(f"/api/projects/{pid}/run/video", json={"scenes": [2], "feedback": "laugh"}).status_code == 202
+    assert wait_job(client, pid)["status"] == "done"
+    shots = {s["index"]: s for s in client.get(f"/api/projects/{pid}/plan").json()["plan"]["shots"]}
+    assert shots[indexes[0]]["action"] == "Ana laughs"
+    assert shots[1]["action"] == "action 1"  # a shot outside the scene is never changed
+    assert all(shots[i]["action"] == f"action {i}" for i in indexes[1:])  # a shot left out stays
+
+
 def test_pinning_prompt_marks_scene_stale(client, tmp_path, monkeypatch):
     pid, gem = video_project(client, tmp_path, monkeypatch)
     run_video(client, pid)

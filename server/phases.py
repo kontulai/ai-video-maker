@@ -257,19 +257,26 @@ def scene_status(p: Project) -> list[SceneView]:
     return views
 
 
-def generate_video(p: Project, log, scenes: list[int] | None = None) -> None:
+def generate_video(p: Project, log, scenes: list[int] | None = None, feedback: str = "") -> None:
     """Make the clips of the given scenes, or of every scene that is not ready, then
     glue all clips into the rough cut. A remade scene starts again from the frame
-    before it and its prompts are fitted to that footage afresh."""
+    before it and its prompts are fitted to that footage afresh. With `feedback` (what
+    was wrong, what should change) Gemini first revises the shots of the scenes being
+    redone, and the bible too when the whole video is redone; then every scene asked
+    for is made again, whether or not its shots changed."""
     run = projects.folder(p.id)
     items = load_items(p)
     if not items:
         raise RuntimeError("Plan the scenes first.")
     views = scene_status(p)
-    targets = sorted(set(scenes)) if scenes else [v.number for v in views if v.status != "ready"]
-    unknown = set(targets) - {v.number for v in views}
+    unknown = set(scenes or []) - {v.number for v in views}
     if unknown:
         raise ValueError(f"No such scene: {sorted(unknown)}")
+    if feedback.strip():
+        targets = sorted(set(scenes)) if scenes else [v.number for v in views]
+        items = apply_feedback(p, log, items, targets, feedback, whole=not scenes)
+    else:
+        targets = sorted(set(scenes)) if scenes else [v.number for v in views if v.status != "ready"]
     clip_dir = run / "clips"
     clip_dir.mkdir(exist_ok=True)
     state_path = clip_dir / "steps.json"
@@ -306,6 +313,27 @@ def generate_video(p: Project, log, scenes: list[int] | None = None) -> None:
                 it["prompt"] = pinned[it["index"]]
         write_json(run / "prompts.json", items)
         _record_scenes(p.id, sorted(made), log)
+
+
+def apply_feedback(p: Project, log, items: list[dict], targets: list[int], feedback: str, whole: bool) -> list[dict]:
+    """Have Gemini work the reviewer's feedback into the shots of `targets` (and the bible
+    when `whole`), then rebuild the prompts. Returns the new prompt items."""
+    plan = load_plan(p)
+    if plan is None:
+        raise RuntimeError("Plan the scenes first.")
+    steps = [{"index": it["index"], "scene": int(it.get("scene", 1)), "text": it.get("text", "")}
+             for it in items if int(it.get("scene", 1)) in targets]
+    log(f"Applying the feedback to scene(s) {', '.join(map(str, targets))} with {mv.PROMPT_MODEL}: {feedback.strip()}")
+    from google import genai
+    client = genai.Client(api_key=mv.require_env("GEMINI_API_KEY"))
+    before = {sh.index: sh for sh in plan.shots}
+    new_plan, changes = mv.revise_plan(client, plan, steps, feedback, whole)
+    changed = [sh.index for sh in new_plan.shots if sh != before.get(sh.index)]
+    bible_changed = any(getattr(new_plan, f) != getattr(plan, f)
+                        for f in ("visual_style", "setting", "layout", "lighting", "characters"))
+    log(f"Gemini: {changes}")
+    log(f"Changed: {'the bible, ' if bible_changed else ''}shot(s) {', '.join(map(str, changed)) or 'none'}.")
+    return rebuild_prompts(p, new_plan, pinned_prompts(p))
 
 
 def _record_scenes(project_id: str, targets: list[int], log) -> None:

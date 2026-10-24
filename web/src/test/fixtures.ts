@@ -1,4 +1,4 @@
-import type { Job, PlanView, Project } from "../types";
+import type { Job, PlanView, Project, SceneView, VideoView } from "../types";
 
 /** A project record as the server returns it, with every phase ready and no job. */
 export function project(over: Partial<Project> = {}): Project {
@@ -27,4 +27,15 @@ export function planView(): PlanView {
     items: [{ index: 1, prompt: "wide shot", pinned_for: "" }],
     too_long: [],
   } as unknown as PlanView;
+}
+
+export function videoView(status: SceneView["status"] = "ready"): VideoView {
+  const step = (index: number) => ({ index, start: 0, end: 4, duration: 4, clip: status === "missing" ? null : `clips/clip_${index}.mp4` });
+  return {
+    scenes: [
+      { number: 1, start: 0, end: 8, cut: true, steps: [step(1), step(2)], status },
+      { number: 2, start: 8, end: 16, cut: false, steps: [step(3), step(4)], status },
+    ],
+    rough_cut: status === "ready",
+  };
 }

@@ -67,8 +67,12 @@ The phases of a project:
 2. **Talk track**: write the narration and generate the ElevenLabs voice.
 3. **Scene plan**: segment the narration and plan the bible, scenes and shots;
    edit any of them, move scene breaks, or edit the assembled prompts.
-4. **Video**: generate every scene, then regenerate any single scene; play the
-   clips and the rough cut.
+4. **Video**: generate every scene, then regenerate any single scene or the
+   whole video; play the clips and the rough cut. Regenerating asks what was
+   wrong or what should change: Gemini works the answer into that scene's shots
+   (and into the production bible when the whole video is redone), the prompts
+   are rebuilt and the clips made again. An empty answer rolls again with the
+   same prompts.
 5. **Overlays**: Gemini suggests keyword graphics over the rough cut; edit them
    in a video editor with a timeline (add, move, retime, restyle, delete);
    "Render preview" burns them with ffmpeg for an exact check.

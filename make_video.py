@@ -399,6 +399,79 @@ class ShotList(BaseModel):
     shots: list[Shot]
 
 
+class PlanRevision(BaseModel):
+    """The plan after the person reviewing the video asked for a change."""
+    changes: str = Field(description=(
+        "One or two sentences on what was changed to act on the feedback, or why nothing "
+        "could be changed."))
+    shots: list[Shot] = Field(description=(
+        "Every shot given, with its index, revised where the feedback applies and otherwise "
+        "repeated word for word."))
+    bible: Bible | None = Field(default=None, description=(
+        "The revised production bible when the feedback asks for a change to the style, "
+        "setting, lighting, layout or a character and the whole video is being redone, with "
+        "every field filled in (the unchanged ones repeated word for word). Otherwise null."))
+
+
+REVISE_INSTRUCTIONS = """\
+You are revising the plan of a short narrated training video. It was generated from this plan,
+the person reviewing it was not happy with the scenes listed below and wrote down what was
+wrong or what should change. Apply that feedback to the shots being redone.
+
+- Change only what the feedback asks for. Every other detail of every shot stays word for word.
+- Write the change into the shot the way the shots are already written: concrete, visible
+  actions and expressions, the camera framing, the continuity. A vague wish ("more energy")
+  becomes specific things people do.
+- Return every shot given, with the same index. Never invent new shots or drop one.
+- Keep the rules of the original plan: nobody speaks or mouths words, no legible text anywhere,
+  a calm camera that never reveals what the first shot of the scene did not show, nothing
+  appears or vanishes by itself.
+"""
+
+REVISE_BIBLE_NOTE = """\
+The whole video is being redone, so the feedback may also be about the production bible (the
+style, the setting, the lighting, the layout, a character's look). When it is, return the
+revised bible with every field filled in; otherwise return null for it.
+"""
+
+
+def revise_plan(client, plan: VideoPlan, steps: list[dict], feedback: str, whole: bool) -> tuple[VideoPlan, str]:
+    """Ask Gemini to apply the reviewer's feedback to the shots of `steps` (dicts with
+    index, scene and text), and to the bible too when `whole`. Returns the new plan and
+    Gemini's note on what changed. Shots Gemini did not return, or that were not asked
+    about, are left as they were."""
+    from google.genai import types
+
+    asked = {int(st["index"]) for st in steps}
+    shots = [sh for sh in plan.shots if sh.index in asked]
+    bible = Bible(visual_style=plan.visual_style, setting=plan.setting, layout=plan.layout,
+                  lighting=plan.lighting, characters=plan.characters)
+    narration = "\n".join(f"- step {st['index']} (scene {st['scene']}): \"{st['text']}\"" for st in steps)
+    contents = (
+        f"FEEDBACK:\n{feedback.strip()}\n\n"
+        f"PRODUCTION BIBLE:\n{bible.model_dump_json()}\n\n"
+        + (REVISE_BIBLE_NOTE + "\n" if whole else "")
+        + f"NARRATION OF THE STEPS BEING REDONE:\n{narration}\n\n"
+        f"SHOTS BEING REDONE:\n{ShotList(shots=shots).model_dump_json()}\n\n"
+        "Return the revised shots (and the revised bible when it applies)."
+    )
+    resp = client.models.generate_content(
+        model=PROMPT_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=REVISE_INSTRUCTIONS,
+            response_mime_type="application/json",
+            response_schema=PlanRevision,
+        ),
+    )
+    rev: PlanRevision = resp.parsed or PlanRevision.model_validate_json(resp.text)
+    new = {sh.index: sh for sh in rev.shots if sh.index in asked}
+    update: dict = {"shots": [new.get(sh.index, sh) for sh in plan.shots]}
+    if whole and rev.bible is not None:
+        update.update({f: getattr(rev.bible, f) for f in ("visual_style", "setting", "layout", "lighting", "characters")})
+    return plan.model_copy(update=update), rev.changes
+
+
 REWRITE_INSTRUCTIONS = """\
 These video shot descriptions ask for readable text (quoted words, titles,
 labels, file names, messages). The video model renders text as garbled letters, so rewrite
