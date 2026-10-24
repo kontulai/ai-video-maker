@@ -181,6 +181,10 @@ export interface Overlay {
   rotation: number;
   /** Image overlays: the picture's file in the project folder, overlays/img_1.png. */
   image: string;
+  /** A free point as fractions of the frame, 0 to 1; `position` then names the corner of the
+   * graphic that sits there. null: the preset's own spot near that corner. */
+  x: number | null;
+  y: number | null;
 }
 
 export const MIN_SCALE = 0.1, MAX_SCALE = 5;

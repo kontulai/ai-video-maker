@@ -164,6 +164,27 @@ def test_scale_and_rotation_change_the_text_tags():
     assert bullets.count("\\org(") == 3
 
 
+def test_free_placement_puts_the_anchor_at_the_given_point():
+    # x and y are fractions of the frame; the preset keeps saying which corner of the text sits there
+    free = fx.write_ass([fx.TimedCallout("Free", "swipe", "top-right", 0, 2, x=0.5, y=0.25)], 1280, 720, "#FFC400")
+    assert "\\pos(640,180)" in free and "\\an9" in free
+    slam = fx.write_ass([fx.TimedCallout("Go", "slam", "bottom-left", 0, 2, x=0.1, y=0.9, rotation=5)], 1280, 720, "#FFC400")
+    assert "\\pos(128,648)" in slam and "\\org(128,648)" in slam
+    bullets = fx.write_ass([fx.TimedCallout("Fast", "bullet", "top-left", 0, 2, 0, 2, x=0.4, y=0.5),
+                            fx.TimedCallout("Quiet", "bullet", "top-left", 0, 2, 1, 2, x=0.4, y=0.5)], 1280, 720, "#FFC400")
+    size = round(720 * 0.07)
+    assert f"\\pos({512 + round(size * 0.42) // 2},{360 + size // 2})" in bullets        # first marker at the point
+    assert f",{360 + size // 2 + round(size * 1.5)})" in bullets                            # second row below it
+    preset = fx.write_ass([fx.TimedCallout("Free", "swipe", "top-right", 0, 2)], 1280, 720, "#FFC400")
+    assert "\\pos(1203,65)" in preset                                                     # unchanged without a point
+
+
+def test_stacked_bullets_take_the_first_items_point():
+    timed = fx.stack_bullets([fx.TimedCallout("A", "bullet", "top-left", 0, 3, list_name="l", x=0.3, y=0.2),
+                              fx.TimedCallout("B", "bullet", "bottom-left", 1, 3, list_name="l", x=0.8, y=0.9)])
+    assert [(t.row, t.position, t.x, t.y) for t in timed] == [(0, "top-left", 0.3, 0.2), (1, "top-left", 0.3, 0.2)]
+
+
 def test_image_filter_graph_places_scales_rotates_and_times_pictures():
     imgs = [fx.TimedImage(Path("a.png"), "top-right", 1.0, 4.0),
             fx.TimedImage(Path("b.png"), "center", 2.0, 5.5, scale=0.5, rotation=90)]
@@ -175,5 +196,8 @@ def test_image_filter_graph_places_scales_rotates_and_times_pictures():
     assert "between(t,1.0,4.0)" in graph and "between(t,2.0,5.5)" in graph
     assert "x=W-77-w:y=65" in graph                                               # top-right, inside the margins
     assert "x=(W-w)/2:y=(H-h)/2" in graph
+    free = fx.image_filter_graph([fx.TimedImage(Path("a.png"), "bottom-right", 0, 1, x=0.75, y=0.5),
+                                  fx.TimedImage(Path("b.png"), "center", 0, 1, x=0.1, y=0.2)], 1280, 720, ass=None)
+    assert "x=960-w:y=360-h" in free and "x=128-w/2:y=144-h/2" in free
     assert graph.rstrip().endswith("ass=callouts.ass[v]")
     assert fx.image_filter_graph(imgs[:1], 1280, 720, ass=None).rstrip().endswith("[v]") and "ass=" not in fx.image_filter_graph(imgs[:1], 1280, 720, ass=None)

@@ -7,7 +7,7 @@ vi.mock("../../api", () => ({ fileUrl: (_id: string, name: string) => `/files/${
 
 const text: Overlay = {
   id: "a", kind: "text", text: "Free", style: "swipe", position: "top-left", list_name: "", start: 1, end: 3,
-  anchor: "", segment_index: null, edited: false, scale: 1, rotation: 0, image: "",
+  anchor: "", segment_index: null, edited: false, scale: 1, rotation: 0, image: "", x: null, y: null,
 };
 const picture: Overlay = { ...text, id: "b", kind: "image", text: "", image: "overlays/img_1.png", scale: 2, rotation: 15 };
 const props = (overlay: Overlay, onChange = vi.fn()) => ({
@@ -38,5 +38,19 @@ describe("SidePanel", () => {
     expect((screen.getByLabelText("Size (%)") as HTMLInputElement).value).toBe("200");
     expect((screen.getByLabelText("Rotation (°)") as HTMLInputElement).value).toBe("15");
     expect(screen.getByText("Position")).toBeTruthy();
+  });
+
+  it("edits the point as percentages of the frame, and a preset clears it", () => {
+    const onChange = vi.fn();
+    render(<SidePanel {...props(text, onChange)} />);
+    const x = screen.getByLabelText("X (%)") as HTMLInputElement;
+    expect(x.value).toBe("6");
+    expect((screen.getByLabelText("Y (%)") as HTMLInputElement).value).toBe("9");
+    fireEvent.change(x, { target: { value: "50" } });
+    expect(onChange).toHaveBeenLastCalledWith({ x: 0.5, y: 0.09 });
+    fireEvent.click(screen.getByText("top-right"));
+    expect(onChange).toHaveBeenLastCalledWith({ position: "top-right", x: null, y: null });
+    fireEvent.change(x, { target: { value: "120" } });   // outside the frame: ignored
+    expect(onChange).toHaveBeenCalledTimes(2);
   });
 });

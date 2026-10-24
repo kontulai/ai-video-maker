@@ -14,7 +14,7 @@ export function newOverlay(at: number, duration = 4): Overlay {
   return {
     id: newId(), kind: "text", text: "New overlay", style: "swipe", position: "top-right", list_name: "",
     start: round3(Math.max(0, at)), end: round3(Math.max(0, at) + duration),
-    anchor: "", segment_index: null, edited: true, scale: 1, rotation: 0, image: "",
+    anchor: "", segment_index: null, edited: true, scale: 1, rotation: 0, image: "", x: null, y: null,
   };
 }
 
@@ -23,6 +23,41 @@ export function newImageOverlay(at: number, duration: number, image: string): Ov
 }
 
 export interface Point { x: number; y: number }
+
+/** The presets' margins, as fractions of the frame, like callouts._placement. */
+export const MX = 0.06, MY = 0.09;
+export const ANCHORS: Record<Position, Point> = {
+  "top-left": { x: MX, y: MY }, "top-right": { x: 1 - MX, y: MY },
+  "bottom-left": { x: MX, y: 1 - MY }, "bottom-right": { x: 1 - MX, y: 1 - MY }, center: { x: 0.5, y: 0.5 },
+};
+
+export type Placed = Pick<Overlay, "position" | "x" | "y">;
+
+/** Where the overlay's anchor corner sits, as fractions of the frame: its point, or the preset's spot. */
+export function anchorOf(o: Placed): Point {
+  return o.x !== null && o.y !== null ? { x: o.x, y: o.y } : ANCHORS[o.position];
+}
+
+/** The point after dragging the overlay by dx, dy pixels over a frame of w by h pixels. */
+export function placeFromDrag(o: Placed, dx: number, dy: number, w: number, h: number): Point {
+  const a = anchorOf(o);
+  const clamp = (v: number) => round3(Math.max(0, Math.min(1, v)));
+  return { x: clamp(a.x + dx / w), y: clamp(a.y + dy / h) };
+}
+
+/** `patch` applied to overlay `id`, marked edited. A placement (position or point) given to one
+ * bullet of a named list moves every bullet of that list, since the list is drawn as one block. */
+export function applyPatch(overlays: Overlay[], id: string, patch: Partial<Overlay>): Overlay[] {
+  const target = overlays.find((o) => o.id === id);
+  const placing = target && target.style === "bullet" && target.list_name && ("x" in patch || "y" in patch || "position" in patch);
+  const listPatch: Partial<Overlay> = {};
+  if (placing) for (const k of ["x", "y", "position"] as const) if (k in patch) (listPatch as Record<string, unknown>)[k] = patch[k];
+  return overlays.map((o) => {
+    if (o.id === id) return { ...o, ...patch, edited: true };
+    if (placing && o.style === "bullet" && o.list_name === target.list_name) return { ...o, ...listPatch, edited: true };
+    return o;
+  });
+}
 
 const clampScale = (s: number) => Math.round(Math.max(MIN_SCALE, Math.min(MAX_SCALE, s)) * 100) / 100;
 
@@ -57,10 +92,10 @@ export function wordAt(start: number, words: Word[]): Word | null {
   return snapToWord(start + LEAD_IN, words).word;
 }
 
-export interface Stack { row: number; rows: number; position: Position }
+export interface Stack { row: number; rows: number; position: Position; x: number | null; y: number | null }
 
 /** Bullets of one list whose spans overlap become one list, mirroring callouts.stack_bullets:
- * rows in start order, every item in the first item's position. */
+ * rows in start order, every item at the first item's position and point. */
 export function stackRows(overlays: Overlay[]): Map<string, Stack> {
   const out = new Map<string, Stack>();
   const ordered = [...overlays].sort((a, b) => a.start - b.start || a.end - b.end);
@@ -68,7 +103,7 @@ export function stackRows(overlays: Overlay[]): Map<string, Stack> {
   const groups: Overlay[][] = [];
   for (const o of ordered) {
     if (o.style !== "bullet" || !o.list_name) {
-      out.set(o.id, { row: 0, rows: 1, position: o.position });
+      out.set(o.id, { row: 0, rows: 1, position: o.position, x: o.x, y: o.y });
       continue;
     }
     let group = open.get(o.list_name);
@@ -77,7 +112,8 @@ export function stackRows(overlays: Overlay[]): Map<string, Stack> {
       open.set(o.list_name, group);
       groups.push(group);
     }
-    out.set(o.id, { row: group.length, rows: 1, position: group[0]?.position ?? o.position });
+    const lead = group[0] ?? o;
+    out.set(o.id, { row: group.length, rows: 1, position: lead.position, x: lead.x, y: lead.y });
     group.push(o);
   }
   for (const group of groups) for (const o of group) out.get(o.id)!.rows = group.length;

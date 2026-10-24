@@ -5,7 +5,7 @@ import { fmtTime } from "../common";
 import OverlayLayer from "./OverlayLayer";
 import SidePanel from "./SidePanel";
 import Timeline from "./Timeline";
-import { newId, newImageOverlay, newOverlay, round3 } from "./overlayModel";
+import { applyPatch, newId, newImageOverlay, newOverlay, round3 } from "./overlayModel";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
@@ -68,7 +68,7 @@ function Editor({ project, view, onOverlays, locked = false }, ref) {
   }, [project.id]);
 
   const update = (id: string, patch: Partial<Overlay>) => {
-    setOverlays((os) => os.map((o) => (o.id === id ? { ...o, ...patch, edited: true } : o)));
+    setOverlays((os) => applyPatch(os, id, patch));
     schedule();
   };
   const place = (o: Overlay) => {

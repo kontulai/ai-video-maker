@@ -199,6 +199,8 @@ class TimedCallout:
     list_name: str = ""
     scale: float = 1.0      # multiplies the style's size
     rotation: float = 0.0   # degrees, clockwise like CSS (ASS \frz counts the other way)
+    x: float | None = None  # a free point, as fractions of the frame; `position` then only says
+    y: float | None = None  # which corner of the graphic sits there (None: the preset's own spot)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -213,6 +215,8 @@ class TimedImage:
     end: float
     scale: float = 1.0
     rotation: float = 0.0   # degrees, clockwise
+    x: float | None = None  # a free point for the corner `position` names, as fractions of the frame
+    y: float | None = None
 
 
 IMAGE_WIDTH = 0.30
@@ -235,8 +239,8 @@ def stack_bullets(timed: list[TimedCallout]) -> list[TimedCallout]:
         if group is None or t.start >= max(g.end for g in group):
             group = groups[t.list_name] = []
             closed.append(group)
-        item = TimedCallout(**{**asdict(t), "position": (group[0].position if group else t.position),
-                               "row": len(group)})
+        lead = group[0] if group else t
+        item = TimedCallout(**{**asdict(t), "position": lead.position, "x": lead.x, "y": lead.y, "row": len(group)})
         group.append(item)
         out.append(item)
     for group in closed:
@@ -381,6 +385,14 @@ def image_filter_graph(images: list[TimedImage], width: int, height: int, ass: s
         "bottom-left": f"x={mx}:y=H-{my}-h", "bottom-right": f"x=W-{mx}-w:y=H-{my}-h",
         "center": "x=(W-w)/2:y=(H-h)/2",
     }
+
+    def placed(im: TimedImage) -> str:
+        if im.x is None or im.y is None:
+            return place[im.position]
+        px, py = round(width * im.x), round(height * im.y)
+        xs = f"{px}-w" if im.position.endswith("right") else f"{px}-w/2" if im.position == "center" else f"{px}"
+        ys = f"{py}-h" if im.position.startswith("bottom") else f"{py}-h/2" if im.position == "center" else f"{py}"
+        return f"x={xs}:y={ys}"
     chains, last = [], "[0:v]"
     for i, im in enumerate(images):
         w = max(1, round(width * IMAGE_WIDTH * im.scale))
@@ -393,26 +405,30 @@ def image_filter_graph(images: list[TimedImage], width: int, height: int, ass: s
                   f"fade=t=out:st={max(im.start, im.end - fade):g}:d={fade:g}:alpha=1"]
         chains.append(f"[{first_input + i}:v]{','.join(steps)}[i{i}]")
         out = "[v]" if ass is None and i == len(images) - 1 else f"[v{i + 1}]"
-        chains.append(f"{last}[i{i}]overlay={place[im.position]}:enable='between(t,{im.start},{im.end})'{out}")
+        chains.append(f"{last}[i{i}]overlay={placed(im)}:enable='between(t,{im.start},{im.end})'{out}")
         last = out
     if ass is not None:
         chains.append(f"{last}ass={ass}[v]")
     return ";".join(chains)
 
 
-def _placement(position: str, w: int, h: int) -> tuple[int, int, int]:
-    """(numpad alignment, x, y) for a position name."""
+def _placement(position: str, w: int, h: int, x: float | None = None, y: float | None = None) -> tuple[int, int, int]:
+    """(numpad alignment, x, y) for a position name, or for a free point (fractions of the frame)
+    with that position's alignment."""
     mx, my = round(w * 0.06), round(h * 0.09)
-    return {
+    an, px, py = {
         "top-left": (7, mx, my), "top-right": (9, w - mx, my),
         "bottom-left": (1, mx, h - my), "bottom-right": (3, w - mx, h - my),
         "center": (5, w // 2, h // 2),
     }[position]
+    if x is not None and y is not None:
+        px, py = round(w * x), round(h * y)
+    return an, px, py
 
 
 def _events_for(t: TimedCallout, w: int, h: int, accent: str, font: str, heavy: str) -> list[str]:
     base = min(w, h)
-    an, x, y = _placement(t.position, w, h)
+    an, x, y = _placement(t.position, w, h, t.x, t.y)
     dur = int((t.end - t.start) * 1000)
     start, end = _ass_time(t.start), _ass_time(t.end)
     ac = _ass_color(accent)
@@ -495,13 +511,14 @@ def _bullet(t: TimedCallout, w: int, h: int, ac: str, font: str, ev) -> list[str
     base = min(w, h)
     size = round(base * 0.07 * t.scale)
     line_h = round(size * 1.5)
-    mx, my = round(w * 0.06), round(h * 0.09)
+    # the list hangs from its anchor: the preset's margins, or the free point
+    _, mx, ay = _placement(t.position, w, h, t.x, t.y)
     if t.position == "bottom-left":
-        cy = h - my - size // 2 - (t.rows - 1 - t.row) * line_h
+        cy = ay - size // 2 - (t.rows - 1 - t.row) * line_h
     elif t.position == "center":
-        cy = round(h / 2 + (t.row - (t.rows - 1) / 2) * line_h)
+        cy = round(ay + (t.row - (t.rows - 1) / 2) * line_h)
     else:  # top-left
-        cy = my + size // 2 + t.row * line_h
+        cy = ay + size // 2 + t.row * line_h
     mark = round(size * 0.42)
     tx = mx + mark + round(size * 0.45)
     text = _ass_escape(t.text)

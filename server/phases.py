@@ -420,6 +420,8 @@ class Overlay(BaseModel):
     image: str = ""   # picture overlays: a file in the project folder, overlays/img_1.png
     scale: float = Field(1.0, ge=0.1, le=5)    # text: multiplies the style's size; image: 1 = 30 % of the width
     rotation: float = Field(0.0, ge=-180, le=180)   # degrees, clockwise
+    x: float | None = Field(None, ge=0, le=1)   # a free point as fractions of the frame; `position`
+    y: float | None = Field(None, ge=0, le=1)   # then names the corner that sits there
 
 
 def callouts_path(p: Project) -> Path:
@@ -508,11 +510,11 @@ def render(p: Project, log, name: str) -> Path:
         if path is None or not path.is_file():
             log(f"Skipping a picture overlay: {o.image or '(no file)'} is missing.")
             continue
-        pictures.append(fx.TimedImage(path, o.position, o.start, o.end, o.scale, o.rotation))
+        pictures.append(fx.TimedImage(path, o.position, o.start, o.end, o.scale, o.rotation, o.x, o.y))
     ass_path = None
     if texts:
         timed = fx.stack_bullets([fx.TimedCallout(o.text, o.style, o.position, o.start, o.end, list_name=o.list_name,
-                                                  scale=o.scale, rotation=o.rotation) for o in texts])
+                                                  scale=o.scale, rotation=o.rotation, x=o.x, y=o.y) for o in texts])
         width, height = mv.video_size(rough_cut)
         ass_path = run / "callouts.ass"
         ass_path.write_text(fx.write_ass(timed, width, height, accent or fx.DEFAULT_ACCENT,

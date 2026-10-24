@@ -938,6 +938,7 @@ def test_overlay_pictures_are_uploaded_and_drawn_with_scale_and_rotation(client,
     assert got["t"]["kind"] == "text" and got["t"]["scale"] == 1.5 and got["t"]["rotation"] == -8
     assert got["i"]["kind"] == "image" and got["i"]["image"] == "overlays/img_1.png"
     assert got["old"]["kind"] == "text" and got["old"]["scale"] == 1.0 and got["old"]["rotation"] == 0.0
+    assert got["old"]["x"] is None and got["old"]["y"] is None
 
     job = run_phase(client, pid, "preview-render")
     assert any("picture" in line for line in job["log"])
@@ -947,6 +948,18 @@ def test_overlay_pictures_are_uploaded_and_drawn_with_scale_and_rotation(client,
     assert "\\frz7" in ass                      # the swipe's own -1 degree tilt plus the 8 degrees back
     assert "img_1" not in ass                   # pictures are drawn by ffmpeg, not by the subtitle renderer
     assert (projects.folder(pid) / "overlay_preview.mp4").exists()
+
+
+def test_overlays_can_be_placed_at_a_free_point(client, tmp_path, monkeypatch):
+    pid, gem = overlay_project(client, tmp_path, monkeypatch)
+    ovs = [overlay(id="t", text="HERE", style="swipe", position="top-left", start=1.0, end=3.0, x=0.5, y=0.5)]
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": ovs}).status_code == 200
+    assert overlays_view(client, pid)["overlays"][0]["x"] == 0.5
+    bad = [overlay(id="t", text="HERE", start=1.0, end=3.0, x=1.5, y=0.5)]
+    assert client.put(f"/api/projects/{pid}/overlays", json={"accent_color": "#00FF00", "overlays": bad}).status_code == 422
+    run_phase(client, pid, "preview-render")
+    w, h = mv.video_size(projects.folder(pid) / "rough_cut.mp4")
+    assert f"\\pos({w // 2},{h // 2})" in (projects.folder(pid) / "callouts.ass").read_text()
 
 
 def test_a_missing_overlay_picture_is_skipped_with_a_note(client, tmp_path, monkeypatch):

@@ -1,6 +1,6 @@
 import { fileUrl } from "../../api";
 import { MAX_SCALE, MIN_SCALE, POSITIONS, STYLES, type Overlay, type Position, type Style, type Word } from "../../types";
-import { BULLET_POSITIONS, MIN_LENGTH, round3, snapToWord, wordAt } from "./overlayModel";
+import { BULLET_POSITIONS, MIN_LENGTH, anchorOf, round3, snapToWord, wordAt } from "./overlayModel";
 
 const STYLE_HELP: Record<Style, string> = {
   slam: "huge text that crashes in; 1 to 2 words",
@@ -23,7 +23,7 @@ export default function SidePanel({ overlay, words, duration, accent, projectId,
         </div>
       </div>
       {overlay ? <Fields overlay={overlay} words={words} duration={duration} projectId={projectId} onChange={onChange} onDuplicate={onDuplicate} onDelete={onDelete} /> : (
-        <div className="panel muted">Click an overlay in the picture or on the timeline to edit it, or add one at the playhead. Drag the selected overlay to another corner, its corner handle to resize it and the handle above it to turn it.</div>
+        <div className="panel muted">Click an overlay in the picture or on the timeline to edit it, or add one at the playhead. Drag the selected overlay anywhere in the picture, its corner handle to resize it and the handle above it to turn it.</div>
       )}
     </div>
   );
@@ -50,6 +50,12 @@ function Fields({ overlay: o, words, duration, projectId, onChange, onDuplicate,
   const setRotation = (deg: number) => {
     if (!Number.isFinite(deg) || deg < -180 || deg > 180) return;
     onChange({ rotation: Math.round(deg * 10) / 10 });
+  };
+  const anchor = anchorOf(o);
+  const free = o.x !== null && o.y !== null;
+  const setPoint = (axis: "x" | "y", percent: number) => {
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) return;
+    onChange({ ...anchor, [axis]: Math.round(percent * 10) / 1000 });
   };
   const picture = o.kind === "image";
   const positions: readonly Position[] = !picture && o.style === "bullet" ? BULLET_POSITIONS : POSITIONS;
@@ -104,9 +110,22 @@ function Fields({ overlay: o, words, duration, projectId, onChange, onDuplicate,
       <label>Position {!picture && o.style === "bullet" && <span>(lists stack from the left)</span>}</label>
       <div className="choices">
         {POSITIONS.map((p) => (
-          <button key={p} className={`small ${o.position === p ? "on" : ""}`} disabled={!positions.includes(p)} onClick={() => onChange({ position: p })}>{p}</button>
+          <button key={p} className={`small ${o.position === p && !free ? "on" : ""}`} disabled={!positions.includes(p)} onClick={() => onChange({ position: p, x: null, y: null })}>{p}</button>
         ))}
       </div>
+      <div className="grid2">
+        <div>
+          <label htmlFor={`ov-x-${o.id}`}>X (%)</label>
+          <input id={`ov-x-${o.id}`} type="number" step={1} min={0} max={100} value={Math.round(anchor.x * 100)} onChange={(e) => setPoint("x", parseFloat(e.target.value))} />
+        </div>
+        <div>
+          <label htmlFor={`ov-y-${o.id}`}>Y (%)</label>
+          <input id={`ov-y-${o.id}`} type="number" step={1} min={0} max={100} value={Math.round(anchor.y * 100)} onChange={(e) => setPoint("y", parseFloat(e.target.value))} />
+        </div>
+      </div>
+      <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+        {free ? `Placed freely: the ${o.position === "center" ? "centre" : o.position.replace("-", " ")} of the ${picture ? "picture" : "text"} sits at this point. A preset above puts it back.` : "The preset's spot. Drag the overlay or type a point to place it anywhere."}
+      </p>
       {!picture && (
         <>
           <label>List name {o.style !== "bullet" && <span>(bullets only)</span>}</label>

@@ -7,7 +7,7 @@ vi.mock("../../api", () => ({ fileUrl: (_id: string, name: string) => `/files/${
 
 const base: Overlay = {
   id: "a", kind: "text", text: "Free", style: "swipe", position: "top-left", list_name: "", start: 0, end: 5,
-  anchor: "", segment_index: null, edited: false, scale: 1, rotation: 0, image: "",
+  anchor: "", segment_index: null, edited: false, scale: 1, rotation: 0, image: "", x: null, y: null,
 };
 const props = (overlays: Overlay[], selected: string | null = null, onChange = vi.fn()) => ({
   overlays, t: 1, accent: "#ffc400", selected, projectId: "p1", onSelect: vi.fn(), onChange,
@@ -56,5 +56,24 @@ describe("OverlayLayer", () => {
   it("has no handles on an unselected overlay", () => {
     const { container } = render(<OverlayLayer {...props([base])} />);
     expect(container.querySelector(".ovl-handle")).toBeNull();
+  });
+
+  it("drags the selected overlay to a free point, in fractions of the frame", () => {
+    const onChange = vi.fn();
+    render(<OverlayLayer {...props([base], "a", onChange)} />);
+    const el = screen.getByTitle("Free");
+    fireEvent.pointerDown(el, { pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(el, { pointerId: 1, clientX: 74, clientY: 46 });
+    fireEvent.pointerUp(el, { pointerId: 1, clientX: 74, clientY: 46 });
+    expect(onChange).toHaveBeenCalledWith("a", { x: 0.16, y: 0.19 });
+  });
+
+  it("draws a freely placed overlay with the chosen corner at its point", () => {
+    render(<OverlayLayer {...props([{ ...base, position: "top-right", x: 0.5, y: 0.25 }])} />);
+    const el = screen.getByTitle("Free");
+    expect(el.style.left).toBe("50%");
+    expect(el.style.top).toBe("25%");
+    expect(el.style.transform).toContain("translate(-100%, 0)");
+    expect(el.style.transformOrigin).toBe("right top");
   });
 });

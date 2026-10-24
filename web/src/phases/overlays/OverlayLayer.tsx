@@ -1,12 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { fileUrl } from "../../api";
-import { IMAGE_WIDTH, POSITIONS, type Overlay, type Position } from "../../types";
-import { BULLET_POSITIONS, rotationFromDrag, scaleFromDrag, stackRows, type Point } from "./overlayModel";
+import { IMAGE_WIDTH, type Overlay } from "../../types";
+import { anchorOf, placeFromDrag, rotationFromDrag, scaleFromDrag, stackRows, type Point, type Stack } from "./overlayModel";
 
-const MX = 0.06, MY = 0.09;
-const ANCHORS: Record<Position, [number, number]> = {
-  "top-left": [MX, MY], "top-right": [1 - MX, MY], "bottom-left": [MX, 1 - MY], "bottom-right": [1 - MX, 1 - MY], center: [0.5, 0.5],
-};
 /** The styles' own tilt, clockwise degrees, like the ASS \\frz the renderer settles on. */
 const TILT = { slam: 3, swipe: 1, reveal: 0, bullet: 0 } as const;
 
@@ -14,8 +10,8 @@ type Mode = "move" | "resize" | "rotate";
 interface Drag { id: string; mode: Mode; center: Point; from: Point; to: Point; scale0: number; rotation0: number }
 
 /** Draws the overlays visible at time t over the video, as CSS approximations of the ASS styles
- * and ffmpeg placements. The selected one can be dragged to another anchor, resized from its
- * corner handle and turned with the handle above it. */
+ * and ffmpeg placements. The selected one can be dragged anywhere, resized from its corner handle
+ * and turned with the handle above it. */
 export default function OverlayLayer({ overlays, t, accent, selected, projectId, onSelect, onChange }: {
   overlays: Overlay[]; t: number; accent: string; selected: string | null; projectId: string;
   onSelect: (id: string) => void; onChange: (id: string, patch: Partial<Overlay>) => void;
@@ -58,16 +54,8 @@ export default function OverlayLayer({ overlays, t, accent, selected, projectId,
     if (drag.mode === "rotate") { onChange(o.id, { rotation: rotationFromDrag(drag.center, drag.from, drag.to, drag.rotation0) }); return; }
     const dx = drag.to.x - drag.from.x, dy = drag.to.y - drag.from.y;
     if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
-    const rect = ref.current!.getBoundingClientRect();
-    const px = (e.clientX - rect.left) / rect.width, py = (e.clientY - rect.top) / rect.height;
-    const allowed = o.kind === "text" && o.style === "bullet" ? BULLET_POSITIONS : POSITIONS;
-    let best: Position = o.position, bestD = Infinity;
-    for (const p of allowed) {
-      const [ax, ay] = ANCHORS[p];
-      const d = (ax - px) ** 2 + (ay - py) ** 2;
-      if (d < bestD) { bestD = d; best = p; }
-    }
-    if (best !== o.position) onChange(o.id, { position: best });
+    // a bullet of a list is drawn where the list is, so the drag starts from there
+    onChange(o.id, placeFromDrag(stacks.get(o.id)!, dx, dy, size.w, size.h));
   };
 
   return (
@@ -113,30 +101,27 @@ export default function OverlayLayer({ overlays, t, accent, selected, projectId,
   );
 }
 
-function styleFor(o: Overlay, st: { row: number; rows: number; position: Position }, accent: string, base: number, width: number, drag: Drag | null): CSSProperties {
+function styleFor(o: Overlay, st: Stack, accent: string, base: number, width: number, drag: Drag | null): CSSProperties {
   const pos = st.position;
   const s: CSSProperties = { position: "absolute" };
-  const right = pos.endsWith("right");
+  const right = pos.endsWith("right"), bottom = pos.startsWith("bottom");
   const transforms: string[] = [];
-  if (pos === "center") {
-    s.left = "50%"; s.top = "50%"; s.textAlign = "center";
-    transforms.push("translate(-50%, -50%)");
-  } else {
-    if (right) s.right = `${MX * 100}%`; else s.left = `${MX * 100}%`;
-    if (pos.startsWith("top")) s.top = `${MY * 100}%`; else s.bottom = `${MY * 100}%`;
-    if (right) s.textAlign = "right";
-  }
+  // the anchor corner of the box sits at the anchor point; the box extends away from it
+  const a = anchorOf(st);
+  s.left = `${a.x * 100}%`; s.top = `${a.y * 100}%`;
+  transforms.push(`translate(${pos === "center" ? "-50%" : right ? "-100%" : "0"}, ${pos === "center" ? "-50%" : bottom ? "-100%" : "0"})`);
+  if (pos === "center") s.textAlign = "center"; else if (right) s.textAlign = "right";
   // text turns about its anchor like the ASS \\org tag; a picture turns about its own centre like ffmpeg's rotate
-  s.transformOrigin = pos === "center" || o.kind === "image" ? "center" : `${right ? "right" : "left"} ${o.kind === "text" && o.style === "bullet" ? "center" : pos.startsWith("top") ? "top" : "bottom"}`;
+  s.transformOrigin = pos === "center" || o.kind === "image" ? "center" : `${right ? "right" : "left"} ${o.kind === "text" && o.style === "bullet" ? "center" : bottom ? "bottom" : "top"}`;
   let tilt = 0;
   if (o.kind === "image") {
     s.lineHeight = 0; s.width = width * IMAGE_WIDTH * o.scale;
   } else if (o.style === "bullet") {
     const size = base * 0.07 * o.scale, lineH = size * 1.5;
     s.fontSize = size;
-    if (pos === "top-left") s.top = `calc(${MY * 100}% + ${st.row * lineH}px)`;
-    else if (pos === "bottom-left") s.bottom = `calc(${MY * 100}% + ${(st.rows - 1 - st.row) * lineH}px)`;
-    else transforms.push(`translateY(${(st.row - (st.rows - 1) / 2) * lineH}px)`);
+    // rows hang below a top anchor, pile up above a bottom one and spread around the centre
+    const offset = pos === "top-left" ? st.row * lineH : pos === "bottom-left" ? -(st.rows - 1 - st.row) * lineH : (st.row - (st.rows - 1) / 2) * lineH;
+    if (offset) transforms.push(`translateY(${offset}px)`);
   } else if (o.style === "slam") {
     const size = base * (o.text.length <= 8 ? 0.21 : 0.15) * o.scale;
     s.fontSize = size; s.color = accent;
