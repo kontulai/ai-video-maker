@@ -228,7 +228,13 @@ def test_cross_site_requests_cannot_change_anything(client):
     # Reading is harmless, and the app's own origin (or none, as from curl) is fine.
     assert client.get("/api/projects", headers=evil).status_code == 200
     assert client.patch(f"/api/projects/{pid}", json={"name": "Renamed"}, headers={"Origin": "http://127.0.0.1:8000"}).status_code == 200
-    assert client.patch(f"/api/projects/{pid}", json={"name": "Vite"}, headers={"Origin": "http://localhost:5173"}).status_code == 200
+    # Another local app (another port) is another site; the Vite dev server passes
+    # because its proxy keeps the browser's Host, so the ports match.
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Vite"}, headers={"Origin": "http://localhost:5173"}).status_code == 403
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Vite"},
+                        headers={"Origin": "http://localhost:5173", "Host": "localhost:5173"}).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Loop"}, headers={"Origin": "http://localhost:8000"}).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "NoPort"}, headers={"Origin": "http://localhost"}).status_code == 403
     assert client.patch(f"/api/projects/{pid}", json={"name": "Again"}).status_code == 200
     # DNS rebinding: a site whose name now resolves to 127.0.0.1 sends a matching Host
     # and Origin. Only loopback names are served at all, on any method.

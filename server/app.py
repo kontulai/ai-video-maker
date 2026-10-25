@@ -26,12 +26,16 @@ app = FastAPI(title="AI video maker")
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-def _hostname(netloc: str) -> str:
-    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '::1'."""
+def _host_port(netloc: str) -> tuple[str, str]:
+    """'localhost:8000' -> ('localhost', '8000'), '[::1]:8000' -> ('::1', '8000'), 'localhost' -> ('localhost', '')."""
     netloc = netloc.strip().lower()
     if netloc.startswith("["):
-        return netloc[1:netloc.find("]")]
-    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+        end = netloc.find("]")
+        return netloc[1:end], netloc[end + 2:]
+    if netloc.count(":") == 1:
+        host, _, port = netloc.partition(":")
+        return host, port
+    return netloc, ""
 
 
 @app.middleware("http")
@@ -40,13 +44,17 @@ async def local_requests_only(request: Request, call_next):
     the same browser could start jobs (which cost API credits) or edit projects with a
     cross-site request. Two checks stop that: the Host must be one of this machine's own
     names (a site whose DNS is rebound to 127.0.0.1 is refused on every method), and a
-    request that would change something must come from one of those names too (browsers
-    send the page's Origin with it; curl and the app's GETs send none)."""
-    if _hostname(request.headers.get("host", "")) not in LOCAL_HOSTS:
+    request that would change something must come from one of those names on the same
+    port (browsers send the page's Origin with it; curl and the app's GETs send none).
+    Another local app is another site; the Vite dev server passes because its proxy keeps
+    the browser's Host, so the ports match."""
+    host, port = _host_port(request.headers.get("host", ""))
+    if host not in LOCAL_HOSTS:
         return JSONResponse({"detail": "This server only answers to localhost."}, status_code=400)
     origin = request.headers.get("origin")
     if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
-        if _hostname(urlsplit(origin).netloc) not in LOCAL_HOSTS:
+        o_host, o_port = _host_port(urlsplit(origin).netloc)
+        if o_host not in LOCAL_HOSTS or o_port != port:
             return JSONResponse({"detail": "Requests from other sites are refused."}, status_code=403)
     return await call_next(request)
 runner = JobRunner()
