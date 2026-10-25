@@ -181,6 +181,24 @@ def test_fit_checks():
     assert failed(ev_checks.check_fit(bad, frame)) == {"frame_terms", "no_screen_text", "nobody_enters"}
 
 
+def test_checks_accept_what_the_prompts_ask_for():
+    """Seen in a real baseline run: the model complying with a rule must not fail its check."""
+    segments = [Segment(1, 0, 10, 10, "Mount the blank then lock it down"), Segment(2, 10, 20, 10, "Bring the speed up slowly")]
+    plan = good_plan(segments)
+    plan.shots[0].expression = "Warm, satisfied closed-mouth smile, mouths closed"
+    plan.shots[1].action = "Ana stands centre-left; the shaped bowl sits center-right on the lathe"
+    assert failed(ev_checks.check_plan(plan, segments, 30)) == set()
+    numbered = [fx.Callout(segment_index=1, text="1. MOUNT THE BLANK", anchor="Mount the blank", style="swipe",
+                           position="top-left", list_name="steps"),
+                fx.Callout(segment_index=2, text="2. SPEED UP SLOWLY", anchor="speed up slowly", style="swipe",
+                           position="top-left", list_name="steps")]
+    assert failed(ev_checks.check_callouts(numbered, segments, "medium")) == set()
+    frame = "Priya seated frame-left, monitor at centre"
+    fit = ("Header\nIN FRAME NOW: " + frame + "\nCAMERA: Medium shot\nACTION: Priya moves the cursor; a dark tooltip "
+           "appears beside it on the monitor\nEXPRESSION: Alert\nCONTINUITY: Same")
+    assert failed(ev_checks.check_fit(fit, frame)) == set()
+
+
 # -- the judge --------------------------------------------------------------------------------
 
 def test_judge_scores_a_plan_against_the_rubric(tmp_path):

@@ -31,11 +31,15 @@ WORD_LIMITS = {
     "scene.setting": 40, "scene.layout": 40, "scene.reason": 12,
 }
 SLACK = 1.25
-BARE_SIDE = re.compile(r"(?<!frame-)\b(left|right)\b", re.IGNORECASE)
+# A side is fine when named as the camera sees it: frame-left, centre-right...
+BARE_SIDE = re.compile(r"(?<!frame-)(?<!centre-)(?<!center-)\b(left|right)\b", re.IGNORECASE)
 SPEECH = re.compile(r"\b(speak|speaks|speaking|say|says|saying|explain|explains|explaining|"
                     r"present|presents|presenting|talk|talks|talking|tell|tells|telling|"
                     r"mouth|mouths|mouthing|narrat\w*)\b", re.IGNORECASE)
-ENTERS = re.compile(r"\b(walks? in|enters?|entering|comes? in|steps? in|appears?|appearing|"
+# "mouth closed" and "closed-mouth smile" are the model obeying the rule, not breaking it.
+MOUTH_SHUT = re.compile(r"\bclosed[- ]mouths?\b|\bmouths? (?:closed|shut|still)\b", re.IGNORECASE)
+# Things may appear on a screen in frame; this is about people and props joining the shot.
+ENTERS = re.compile(r"\b(walks? in|enters?|entering|comes? in|steps? in|"
                     r"joins?|joining|arrives?|arriving)\b", re.IGNORECASE)
 MARKUP = re.compile(r"^\s*(#+\s|[-*•]\s|\d+[.)]\s)|\*\*|\[[^\]]*\]\(", re.MULTILINE)
 UNSPOKEN = re.compile(r"\d|%|&|\b(e\.g\.|i\.e\.|etc\.|vs\.)", re.IGNORECASE)
@@ -128,7 +132,7 @@ def check_plan(plan: mv.VideoPlan, segments: list[Segment], max_scene: int) -> l
                 texty.append(f"shot {shot.index} {field}: {text[:100]}")
             if field != "expression" and BARE_SIDE.search(text):
                 sides.append(f"shot {shot.index} {field}: {text[:100]}")
-            if field != "camera" and SPEECH.search(text):
+            if field != "camera" and SPEECH.search(MOUTH_SHUT.sub("", text)):
                 speech.append(f"shot {shot.index} {field}: {text[:100]}")
             if (o := _over(field, text, f"shot {shot.index}")):
                 over.append(o)
@@ -161,8 +165,9 @@ def check_callouts(callouts: list[fx.Callout], segments: list[Segment], density:
             anchors.append(f"{label}: no such segment")
         elif _norm(c.anchor) not in narration[c.segment_index] or not c.anchor.strip():
             anchors.append(f"{label}: anchor '{c.anchor}' is not in the narration")
-        if not 1 <= _words(c.text) <= 4 or len(c.text) > 22:
-            lengths.append(f"{label}: {_words(c.text)} words, {len(c.text)} chars")
+        words = _words(re.sub(r"^\d+[.)]\s*", "", c.text))  # a list item's number is not a word
+        if not 1 <= words <= 4 or len(c.text) > 22:
+            lengths.append(f"{label}: {words} words, {len(c.text)} chars")
         count[c.segment_index] = count.get(c.segment_index, 0) + 1
         if c.style not in fx.STYLES or c.position not in fx.POSITIONS \
                 or (c.style == "bullet" and c.position not in fx.BULLET_POSITIONS):
