@@ -214,6 +214,23 @@ def test_voices_route_lists_the_account_voices(client, monkeypatch):
     assert r.status_code == 502 and "401" in r.json()["detail"]
 
 
+def test_cross_site_requests_cannot_change_anything(client):
+    """A web page open in the same browser must not be able to start jobs or edit
+    projects on the local server: a request from another origin is refused."""
+    pid = client.post("/api/projects", json={"name": "Mine"}).json()["id"]
+    evil = {"Origin": "https://evil.example"}
+    assert client.post("/api/projects", json={"name": "Theirs"}, headers=evil).status_code == 403
+    assert client.post(f"/api/projects/{pid}/run/final", headers=evil).status_code == 403
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Renamed"}, headers=evil).status_code == 403
+    assert client.delete(f"/api/projects/{pid}", headers=evil).status_code == 403
+    assert client.get(f"/api/projects/{pid}").json()["name"] == "Mine"
+    assert len(client.get("/api/projects").json()) == 1
+    # Reading is harmless, and the app's own origin (or none, as from curl) is fine.
+    assert client.get("/api/projects", headers=evil).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Renamed"}, headers={"Origin": "http://testserver"}).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Again"}).status_code == 200
+
+
 def test_run_twice_is_409(client, monkeypatch):
     import threading
     gate = threading.Event()

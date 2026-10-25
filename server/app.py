@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 import callouts as fx
@@ -18,6 +18,21 @@ from .jobs import Job, JobBusy, JobRunner
 from .projects import Project, Settings
 
 app = FastAPI(title="AI video maker")
+
+
+@app.middleware("http")
+async def same_origin_only(request: Request, call_next):
+    """The server runs on the user's own machine without a login, so a web page open in
+    the same browser could start jobs (which cost API credits) or edit projects with a
+    cross-site request. Browsers send the page's Origin with such requests: a request
+    that would change something is refused unless it comes from the app's own origin
+    (or carries no Origin at all, as curl and the app's GETs do)."""
+    origin = request.headers.get("origin")
+    if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
+        served = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+        if origin.rstrip("/").lower() != served.lower():
+            return JSONResponse({"detail": "Requests from other sites are refused."}, status_code=403)
+    return await call_next(request)
 runner = JobRunner()
 WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 
