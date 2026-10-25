@@ -1,0 +1,12 @@
+{
+  "name": "lathe",
+  "brief": "A photoreal workshop tutorial. Ana, a woodturner in her forties with grey-streaked hair in a low bun, a canvas apron over a dark green shirt and safety glasses, turns a small bowl on a midi lathe in a cluttered garage workshop lit by one window frame-left. Warm, patient, hands-on.",
+  "talk_track": "You will learn how to turn a small bowl from a blank you have just cut. Start by mounting the blank between the chuck and the tailstock and spin it by hand to be sure nothing catches. Set the tool rest a finger's width from the wood, just below centre, and lock it down. Bring the speed up slowly until the blank runs true without shaking the lathe. Take the roughing gouge and rest it on the tool rest before the bevel touches the wood, then ride the bevel and let the edge do the cutting. Work from the centre outwards in light passes until the outside is round. Switch to the bowl gouge to shape the curve, keeping your elbow tucked and moving your whole body rather than your wrists. Stop the lathe often and check the wall thickness with your fingers. When the shape pleases you, sand through the grits with the lathe turning slowly, then wipe on a coat of oil and watch the grain come alive. Next time, try a deeper form and see how the cut changes.",
+  "density": "medium",
+  "in_frame": [
+    {
+      "segment": 2,
+      "in_frame": "Ana centre at the lathe, blank spinning, gouge rack frame-right, window frame-left"
+    }
+  ]
+}

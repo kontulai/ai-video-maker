@@ -56,8 +56,9 @@ class FakeGemini:
 
     def __init__(self, plan=None, omni: FakeInteractions | None = None, callouts=None,
                  image: bytes | None = None, in_frame: str = "Ana centre, bench frame-left",
-                 seen: list | None = None, revise=None, draft=None):
+                 seen: list | None = None, revise=None, draft=None, judge=None):
         self.plan, self.omni, self.callouts, self.image = plan, omni, callouts, image
+        self.judge = judge  # judge(contents) -> evals.judge.Judgement scores a result in the evals
         self.revise = revise  # revise(contents) -> PlanRevision answers feedback on the video
         self.draft = draft  # draft(contents) -> TalkTrackDraft answers a talk track drafted from a PDF
         self.in_frame, self.seen = in_frame, [] if seen is None else seen
@@ -94,6 +95,9 @@ class FakeGemini:
         if schema is getattr(mv, "TalkTrackDraft", None):
             self.seen.append(contents)
             return _answer(self.draft(contents))
+        if getattr(schema, "__name__", "") == "Judgement":
+            self.seen.append(contents)
+            return _answer(self.judge(contents))
         if "IMAGE" in (getattr(config, "response_modalities", None) or []):
             self.images += 1
             self.image_requests.append(contents)

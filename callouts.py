@@ -114,9 +114,9 @@ Rules:
 """
 
 
-def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, str],
-                  visual_style: str, density: str) -> tuple[str, list[Callout]]:
-    """Returns (accent colour, callouts)."""
+def request_callouts(client, model: str, segments: list[Segment], shots: dict[int, str],
+                     visual_style: str, density: str) -> CalloutPlan:
+    """One planner call: the accent colour and the graphics, as the model chose them."""
     from google.genai import types
 
     total = segments[-1].end
@@ -138,10 +138,19 @@ def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, 
         ),
     )
     plan = resp.parsed or CalloutPlan.model_validate_json(resp.text)
-    plan = CalloutPlan.model_validate(plan.model_dump())
-    accent = plan.accent_color if re.fullmatch(r"#?[0-9a-fA-F]{6}", plan.accent_color or "") \
-        else DEFAULT_ACCENT
-    return "#" + accent.lstrip("#").upper(), enforce_rules(plan.callouts, {s.index for s in segments})
+    return CalloutPlan.model_validate(plan.model_dump())
+
+
+def accent_colour(chosen: str) -> str:
+    accent = chosen if re.fullmatch(r"#?[0-9a-fA-F]{6}", chosen or "") else DEFAULT_ACCENT
+    return "#" + accent.lstrip("#").upper()
+
+
+def plan_callouts(client, model: str, segments: list[Segment], shots: dict[int, str],
+                  visual_style: str, density: str) -> tuple[str, list[Callout]]:
+    """Returns (accent colour, callouts), with the planner's rules enforced."""
+    plan = request_callouts(client, model, segments, shots, visual_style, density)
+    return accent_colour(plan.accent_color), enforce_rules(plan.callouts, {s.index for s in segments})
 
 
 def enforce_rules(callouts: list[Callout], valid_idx: set[int]) -> list[Callout]:

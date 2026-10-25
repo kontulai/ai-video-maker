@@ -1,0 +1,12 @@
+{
+  "name": "phishing",
+  "brief": "A corporate security awareness film, cinematic and photoreal. Two colleagues in a modern open-plan office: Priya, a project manager in her thirties with a dark bob and a rust blouse, and Tom, an IT support lead in his fifties with a shaved head, glasses and a navy fleece. They work through a suspicious email together at Priya's desk; the screens are seen but never readable.",
+  "talk_track": "You will learn how to spot a phishing email and what to do about it. It starts the way it always does: a message that looks like it comes from someone you trust, asking for something small and urgent. Look at the sender first. The display name may say your bank or your boss, but the address behind it is often one letter off or from a domain you have never seen. Hover over any link before you click and compare where it really goes with where it claims to go. Watch for pressure. A real colleague rarely needs your password in the next ten minutes. Check the tone, the spelling and the greeting, because attackers copy logos well and language badly. If anything feels off, do not reply and do not click. Use the report button in your mail client so the security team sees it at once, then delete it. If you have already clicked, tell IT straight away; nobody will blame you, and a quick call limits the damage. Make this a habit and you become the strongest link in the chain.",
+  "density": "medium",
+  "in_frame": [
+    {
+      "segment": 3,
+      "in_frame": "Priya seated frame-left facing her monitor at centre, Tom standing behind her frame-right pointing at the screen, open-plan desks soft in the background"
+    }
+  ]
+}

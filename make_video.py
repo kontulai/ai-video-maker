@@ -792,22 +792,10 @@ def generate_image(contents, aspect: str, out: Path) -> Path:
     raise RuntimeError("The image model returned no image.")
 
 
-def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
-                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None,
-                 references: Sequence[Path] = ()) -> list[dict]:
-    """Have Gemini write the production bible, group the steps into scenes and write one
-    shot per step; returns one item per step with the prompt and the scene assignment.
-    With `image` (the first frame of the video) the bible describes what the picture shows;
-    `references` are further pictures of the people, place or style to describe."""
-    prompts_path = run / "prompts.json"
-    if prompts_path.exists():
-        log("Prompts already exist, skipping planning.")
-        return json.loads(prompts_path.read_text())
-
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
+def planner_contents(scene: str, talk_track: str, segments: list[Segment], max_scene: int,
+                     image: Path | None = None, references: Sequence[Path] = ()) -> str | list:
+    """The planner's user message: the brief, the narration and the timed segments, with
+    the first frame and the reference pictures attached when given."""
     seg_list = "\n".join(
         f"Segment {s.index}: {s.start}s-{s.end}s ({s.duration}s). Narration: \"{s.text}\""
         for s in segments
@@ -832,18 +820,44 @@ SEGMENTS ({len(segments)} segments, {segments[-1].end}s in all; group them into 
                      "they show the people, the place or the look wanted. Describe them in the bible "
                      "(faces, builds, clothes, room, colours, style) so the video matches them.\n")
         parts.extend(image_part(r) for r in references)
-    contents: str | list = [*parts, user_msg] if parts else user_msg
-    log(f"Planning {len(segments)} shots with {PROMPT_MODEL}...")
+    return [*parts, user_msg] if parts else user_msg
+
+
+def request_plan(client, scene: str, talk_track: str, segments: list[Segment],
+                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None,
+                 references: Sequence[Path] = ()) -> VideoPlan:
+    """One planner call: the bible, the scenes and one shot per segment."""
+    from google.genai import types
+
     resp = client.models.generate_content(
         model=PROMPT_MODEL,
-        contents=contents,
+        contents=planner_contents(scene, talk_track, segments, max_scene, image, references),
         config=types.GenerateContentConfig(
             system_instruction=PLANNER_INSTRUCTIONS,
             response_mime_type="application/json",
             response_schema=VideoPlan,
         ),
     )
-    plan: VideoPlan = resp.parsed or VideoPlan.model_validate_json(resp.text)
+    return resp.parsed or VideoPlan.model_validate_json(resp.text)
+
+
+def plan_prompts(scene: str, talk_track: str, segments: list[Segment], run: Path,
+                 max_scene: int = MAX_SCENE_SECONDS, image: Path | None = None,
+                 references: Sequence[Path] = ()) -> list[dict]:
+    """Have Gemini write the production bible, group the steps into scenes and write one
+    shot per step; returns one item per step with the prompt and the scene assignment.
+    With `image` (the first frame of the video) the bible describes what the picture shows;
+    `references` are further pictures of the people, place or style to describe."""
+    prompts_path = run / "prompts.json"
+    if prompts_path.exists():
+        log("Prompts already exist, skipping planning.")
+        return json.loads(prompts_path.read_text())
+
+    from google import genai
+
+    client = genai.Client(api_key=require_env("GEMINI_API_KEY"))
+    log(f"Planning {len(segments)} shots with {PROMPT_MODEL}...")
+    plan = request_plan(client, scene, talk_track, segments, max_scene, image, references)
     (run / "plan.json").write_text(plan.model_dump_json(indent=2))
 
     segments = scenes_from_plan(plan, segments, max_scene)

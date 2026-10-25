@@ -150,3 +150,21 @@ cd web && npm test
 The server has no login: it is meant for your own machine (it binds to 127.0.0.1). Because a web page open in the same browser could otherwise post to it, it only answers requests whose `Host` is `localhost`, `127.0.0.1`, `::1` or the `--host` it was started with, and a request that changes something must carry an `Origin` from one of those names on the same port (or none at all, as from `curl`), so another local app cannot post to it either. A page on another site cannot post to it, even if that site's DNS is pointed at 127.0.0.1. Behind a proxy that rewrites the host, start the server with that name as `--host`.
 
 The web tests (vitest and Testing Library) cover the parts of the UI that keep edits safe while jobs run: the scene plan page, the overlay editor and the stepper.
+
+## Evals for the prompts
+
+The Gemini text steps (the shot planner, the keyword graphics, the fit of a cut to the frame it opens on, the talk-track draft) are each driven by an instruction text in `make_video.py` or `callouts.py`. `python -m evals` runs a few fixed cases through those steps and scores the answers, so a change to an instruction can be compared against the run before it.
+
+```bash
+.venv/bin/python -m evals list
+.venv/bin/python -m evals run --label baseline
+.venv/bin/python -m evals run --prompt planner=my_planner.txt --label terse
+.venv/bin/python -m evals compare evals/runs/<baseline-dir> evals/runs/<terse-dir>
+```
+
+Each case in `evals/cases/` is a brief and a narration (segments are synthesised from the narration at speaking pace, or given explicitly); some also give a frame description for the fit step. A run writes `evals/runs/<timestamp>-<label>/` with the raw model answers per case, `summary.json` and `summary.md`. Two kinds of score go in:
+
+- **Checks** are deterministic and mirror the rules the instructions state: one shot per segment, scenes in order and under the maximum, no quoted screen text, nobody speaks, sides named as the camera sees them, field word limits, graphics anchored on words the narration contains, graphics density, spoken prose in a draft, and so on. Each is a pass rate across cases and runs.
+- **The judge** is Gemini again, with a short rubric per step (faithfulness, concreteness, continuity, filmability and layout clarity for a plan; selection, timing and design for graphics; and so on), scoring 1 to 5 with a quoted reason and a verdict naming the most useful improvement. `--no-judge` skips it; `JUDGE_MODEL` picks another model for it.
+
+The checks see the model's raw answers, before the pipeline's own repairs (`clean_bible`, the screen-text rewrite, `enforce_rules`), so they measure the prompt rather than the repairs; a case's result also records how many graphics the rules would have dropped. The summary records a hash of every instruction text, and `compare` lists the prompts that changed next to the deltas. `--prompt NAME=FILE` swaps an instruction for the run only (`planner`, `rewrite`, `fit`, `draft`, `callouts`, `judge`); `--repeat N` runs each case several times, since the models are not deterministic; `--stages plan,callouts` limits a run. Runs cost real API calls (roughly ten text requests per case with the judge) and the image and video steps are not covered, as they are too costly to run on every prompt change. The talk-track draft step only runs for a case that names a `pdf`; none of the shipped cases does, so add one with a small document to tune that prompt.
