@@ -147,6 +147,6 @@ The tests need no API keys. They check the segmentation, run the whole pipeline 
 cd web && npm test
 ```
 
-The server has no login: it is meant for your own machine (it binds to 127.0.0.1). Because a web page open in the same browser could otherwise post to it, every request that changes something must come from the app's own origin (the `Origin` header has to match the host it was served from; requests without an `Origin`, as from `curl`, are fine). If you put it behind a proxy that rewrites the scheme or host, the browser's requests would be refused.
+The server has no login: it is meant for your own machine (it binds to 127.0.0.1). Because a web page open in the same browser could otherwise post to it, it only answers requests whose `Host` is `localhost`, `127.0.0.1`, `::1` or the `--host` it was started with, and a request that changes something must carry an `Origin` from one of those names too (or none at all, as from `curl`). A page on another site cannot post to it, even if that site's DNS is pointed at 127.0.0.1. Behind a proxy that rewrites the host, start the server with that name as `--host`.
 
 The web tests (vitest and Testing Library) cover the parts of the UI that keep edits safe while jobs run: the scene plan page, the overlay editor and the stepper.

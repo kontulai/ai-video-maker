@@ -33,7 +33,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path)
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "x")
-    return TestClient(server_app.app)
+    return TestClient(server_app.app, base_url="http://127.0.0.1:8000")
 
 
 def wait_job(client, pid, timeout=10.0):
@@ -227,8 +227,16 @@ def test_cross_site_requests_cannot_change_anything(client):
     assert len(client.get("/api/projects").json()) == 1
     # Reading is harmless, and the app's own origin (or none, as from curl) is fine.
     assert client.get("/api/projects", headers=evil).status_code == 200
-    assert client.patch(f"/api/projects/{pid}", json={"name": "Renamed"}, headers={"Origin": "http://testserver"}).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Renamed"}, headers={"Origin": "http://127.0.0.1:8000"}).status_code == 200
+    assert client.patch(f"/api/projects/{pid}", json={"name": "Vite"}, headers={"Origin": "http://localhost:5173"}).status_code == 200
     assert client.patch(f"/api/projects/{pid}", json={"name": "Again"}).status_code == 200
+    # DNS rebinding: a site whose name now resolves to 127.0.0.1 sends a matching Host
+    # and Origin. Only loopback names are served at all, on any method.
+    rebound = {"Host": "evil.example:8000", "Origin": "http://evil.example:8000"}
+    assert client.post(f"/api/projects/{pid}/run/final", headers=rebound).status_code in (400, 403)
+    assert client.get(f"/api/projects/{pid}", headers={"Host": "evil.example:8000"}).status_code == 400
+    assert client.get(f"/api/projects/{pid}", headers={"Host": "localhost:8000"}).status_code == 200
+    assert client.get(f"/api/projects/{pid}").json()["name"] == "Again"
 
 
 def test_run_twice_is_409(client, monkeypatch):

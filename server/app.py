@@ -5,6 +5,7 @@ import re
 
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -20,17 +21,32 @@ from .projects import Project, Settings
 app = FastAPI(title="AI video maker")
 
 
+# The names the server answers to. `python -m server --host` adds the bind address; a
+# request whose Host or Origin names anything else is refused.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _hostname(netloc: str) -> str:
+    """'localhost:8000' -> 'localhost', '[::1]:8000' -> '::1'."""
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        return netloc[1:netloc.find("]")]
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+
+
 @app.middleware("http")
-async def same_origin_only(request: Request, call_next):
+async def local_requests_only(request: Request, call_next):
     """The server runs on the user's own machine without a login, so a web page open in
     the same browser could start jobs (which cost API credits) or edit projects with a
-    cross-site request. Browsers send the page's Origin with such requests: a request
-    that would change something is refused unless it comes from the app's own origin
-    (or carries no Origin at all, as curl and the app's GETs do)."""
+    cross-site request. Two checks stop that: the Host must be one of this machine's own
+    names (a site whose DNS is rebound to 127.0.0.1 is refused on every method), and a
+    request that would change something must come from one of those names too (browsers
+    send the page's Origin with it; curl and the app's GETs send none)."""
+    if _hostname(request.headers.get("host", "")) not in LOCAL_HOSTS:
+        return JSONResponse({"detail": "This server only answers to localhost."}, status_code=400)
     origin = request.headers.get("origin")
     if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
-        served = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
-        if origin.rstrip("/").lower() != served.lower():
+        if _hostname(urlsplit(origin).netloc) not in LOCAL_HOSTS:
             return JSONResponse({"detail": "Requests from other sites are refused."}, status_code=403)
     return await call_next(request)
 runner = JobRunner()
